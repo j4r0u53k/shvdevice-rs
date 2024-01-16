@@ -1,0 +1,26 @@
+[package]
+name = "shvdevice-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "shvdevice"
+path = "src/lib.rs"
+
+# [[bin]]
+# name = "example_device"
+# path = "src/main.rs"
+
+[dependencies]
+# shv = { git = "https://github.com/silicon-heaven/shv-rs.git", branch = "master" }
+# shv = { path = "/home/jara/src/shv-rs" }
+shv = { git = "https://github.com/silicon-heaven/shv-rs.git", rev = "e740fd301dc65f3412ad1154595bf61ee5632aba" }
+futures = "0.3.29"
+async-std = { version = "1.12.0", features = ["attributes"] }
+url = "2.4.1"
+clap = { version = "4.4.12", features = ["derive"] }
+log = "0.4.20"
+simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
+duration-str = "0.7.1"
