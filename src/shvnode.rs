@@ -1,9 +1,11 @@
+use std::any::Any;
 use std::collections::{BTreeMap, HashSet};
 use std::format;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use futures::Future;
-use log::warn;
+use log::{warn, error, info};
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{metamethod, RpcMessage, RpcMessageMetaTags, RpcValue, rpcvalue};
 use shv::metamethod::Access;
@@ -87,7 +89,7 @@ impl From<Option<&RpcValue>> for LsParam {
     }
 }
 
-pub fn process_local_dir_ls<V,K>(mounts: &BTreeMap<String, V>, frame: &RpcFrame) -> Option<RequestResult> {
+pub fn process_local_dir_ls<V>(mounts: &BTreeMap<String, V>, frame: &RpcFrame) -> Option<RequestResult> {
     let method = frame.method().unwrap_or_default();
     if !(method == METH_DIR || method == METH_LS) {
         return None
@@ -227,19 +229,22 @@ pub fn find_longest_prefix<'a, 'b, V>(map: &'a BTreeMap<String, V>, shv_path: &'
 type Sender<K> = async_std::channel::Sender<K>;
 type Receiver<K> = async_std::channel::Receiver<K>;
 
-#[derive(Clone)]
-struct DeviceState<S> {
-    // mounts: BTreeMap<String, Box<dyn ShvNode<DeviceCommand>>>,
-    state: Arc<Mutex<S>>,
+#[derive(Clone,Default)]
+pub struct DeviceState(Option<Arc<Mutex<Box<dyn Any + Send + Sync>>>>);
+
+impl DeviceState {
+    pub fn new<T: Any + Send + Sync>(val: T) -> Self {
+        DeviceState(Some(Arc::new(Mutex::new(Box::new(val)))))
+    }
 }
 
 #[derive(Clone)]
-struct RequestData {
-    mount_path: String,
-    request: RpcMessage,
+pub struct RequestData {
+    pub mount_path: String,
+    pub request: RpcMessage,
 }
 
-enum RpcCommand {
+pub enum RpcCommand {
     SendMessage {
         message: RpcMessage,
     },
@@ -259,27 +264,34 @@ pub enum HandlerOutcome {
     Handled,
 }
 
-type HandlerFn<S> = Box<dyn Fn(RequestData, Sender<RpcCommand>, DeviceState<S>) -> Pin<Box<dyn Future<Output = HandlerOutcome>>>>;
+type HandlerFn = Box<dyn Fn(RequestData, Sender<RpcCommand>, DeviceState) -> Pin<Box<dyn Future<Output = HandlerOutcome>>>>;
 
-// pub trait ShvNodeTrait {
-//     fn request_handler(&self) -> HandlerFn;
-// }
-
-pub struct ShvNode<S> {
+pub struct ShvNode {
     defined_methods: Vec<MetaMethod>,
-    request_handler: HandlerFn<S>,
+    request_handler: HandlerFn,
 }
 
-impl<S> ShvNode<S> {
+impl ShvNode {
+    pub fn new<F, O>(defined_methods: Vec<MetaMethod>, request_handler: F) -> ShvNode
+        where
+        F: 'static + Fn(RequestData, Sender<RpcCommand>, DeviceState) -> O,
+        O: 'static + Future<Output = HandlerOutcome>,
+    {
+        ShvNode {
+            defined_methods,
+            request_handler: Box::new(move |r, s, d| Box::pin(request_handler(r, s, d)))
+        }
+    }
+
     fn common_methods(&self) -> Vec<& MetaMethod> {
         DIR_LS_METHODS.iter().collect()
     }
 
-    fn methods(&self) -> Vec<&MetaMethod> {
+    pub fn methods(&self) -> Vec<&MetaMethod> {
         self.common_methods().into_iter().chain(self.defined_methods.iter()).collect()
     }
 
-    fn is_request_granted(&self, rq: &RpcMessage) -> bool {
+    pub fn is_request_granted(&self, rq: &RpcMessage) -> bool {
         let shv_path = rq.shv_path().unwrap_or_default();
         if shv_path.is_empty() {
             let level_str = rq.access().unwrap_or_default();
@@ -297,7 +309,7 @@ impl<S> ShvNode<S> {
         false
     }
 
-    async fn process_request(&mut self, req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, device_state: DeviceState<S>) {
+    pub async fn process_request(&mut self, req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, device_state: DeviceState) {
         match (self.request_handler)(req_data.clone(), rpc_command_sender.clone(), device_state).await {
             HandlerOutcome::NotHandled => {
                 self.process_dir_ls(&req_data.request, rpc_command_sender).await;
@@ -307,15 +319,17 @@ impl<S> ShvNode<S> {
     }
 
     async fn process_dir_ls(&mut self, rq: &RpcMessage, rpc_command_sender: Sender<RpcCommand>) {
-        let mut res = rq.prepare_response().unwrap_or_default(); // FIXME: better handling
+        let mut resp = rq.prepare_response().unwrap_or_default(); // FIXME: better handling
         match self.dir_ls(rq) {
             RequestResult::Response(val) => {
-                res.set_result(val);
+                resp.set_result(val);
             }
             RequestResult::Error(err) => {
-                res.set_error(err);                }
+                resp.set_error(err);                }
         }
-        rpc_command_sender.send(RpcCommand::SendMessage { message: res }).await;
+        if let Err(e) = rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await {
+            error!("process_dir_ls: Cannot send response ({})", e);
+        }
     }
 
     fn dir_ls(&mut self, rq: &RpcMessage) -> RequestResult {
@@ -388,30 +402,16 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
 ];
 
 
+pub fn app_node() -> ShvNode {
+    ShvNode::new(APP_METHODS.into(), app_node_process_request)
+}
+
 pub struct AppNode {
     pub app_name: &'static str,
     pub shv_version_major: i32,
     pub shv_version_minor: i32,
 }
 
-// impl AppNode {
-//     pub fn new_shv_node() -> ShvNode {
-//         ShvNode {
-//             defined_methods: APP_METHODS,
-//             request_handler: Box::new(app_node_process_request),
-//         }
-//     }
-// }
-
-impl Default for AppNode {
-    fn default() -> Self {
-        AppNode {
-            app_name: "",
-            shv_version_major: 3,
-            shv_version_minor: 0,
-        }
-    }
-}
 const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod { name: METH_SHV_VERSION_MAJOR, flags: Flag::IsGetter as u32, access: Access::Browse, param: "", result: "", description: "" },
     MetaMethod { name: METH_SHV_VERSION_MINOR, flags: Flag::IsGetter as u32, access: Access::Browse, param: "", result: "", description: "" },
@@ -419,9 +419,14 @@ const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod { name: METH_PING, flags: Flag::None as u32, access: Access::Browse, param: "", result: "", description: "" },
 ];
 
-const APP_NODE: AppNode = AppNode::default();
+// TODO: define by a macro
+const APP_NODE: AppNode = AppNode {
+    app_name: "",
+    shv_version_major: 3,
+    shv_version_minor: 0,
+};
 
-async fn app_node_process_request<S>(req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, device_state: DeviceState<S>) -> HandlerOutcome {
+async fn app_node_process_request(req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, _device_state: DeviceState) -> HandlerOutcome {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
         let mut resp = rq.prepare_response().unwrap_or_default();
@@ -442,7 +447,9 @@ async fn app_node_process_request<S>(req_data: RequestData, rpc_command_sender: 
         };
         if let Some(val) = resp_value {
             resp.set_result(val);
-            rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await;
+            if let Err(e) = rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await {
+                error!("app_node_process_request: Cannot send response ({e})");
+            }
             return HandlerOutcome::Handled;
         }
     }
@@ -454,15 +461,6 @@ pub struct AppDeviceNode {
     pub version: &'static str,
     pub serial_number: Option<String>,
 }
-impl Default for AppDeviceNode {
-    fn default() -> Self {
-        AppDeviceNode {
-            device_name: "",
-            version: "",
-            serial_number: None,
-        }
-    }
-}
 
 const APP_DEVICE_METHODS: [MetaMethod; 3] = [
     MetaMethod { name: METH_NAME, flags: Flag::IsGetter as u32, access: Access::Browse, param: "", result: "", description: "" },
@@ -470,10 +468,18 @@ const APP_DEVICE_METHODS: [MetaMethod; 3] = [
     MetaMethod { name: METH_SERIAL_NUMBER, flags: Flag::IsGetter as u32, access: Access::Browse, param: "", result: "", description: "" },
 ];
 
-const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode::default();
+pub fn app_device_node() -> ShvNode {
+    ShvNode::new(APP_DEVICE_METHODS.into(), app_device_node_process_request)
+}
 
+// TODO: define by a macro
+pub const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
+    device_name: "",
+    version: "",
+    serial_number: None,
+};
 
-async fn app_device_node_process_request<S>(req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, device_state: DeviceState<S>) -> HandlerOutcome {
+async fn app_device_node_process_request(req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, _device_state: DeviceState) -> HandlerOutcome {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
         let mut resp = rq.prepare_response().unwrap_or_default();
@@ -496,8 +502,46 @@ async fn app_device_node_process_request<S>(req_data: RequestData, rpc_command_s
         };
         if let Some(val) = resp_value {
             resp.set_result(val);
-            rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await;
+            if let Err(e) = rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await {
+                error!("app_device_node_process_request: Cannot send response ({e})");
+            }
             return HandlerOutcome::Handled;
+        }
+    }
+    HandlerOutcome::NotHandled
+}
+
+const METH_GET_DELAYED: &str = "getDelayed";
+
+const DELAY_METHODS: [MetaMethod; 1] = [
+    MetaMethod { name: METH_GET_DELAYED, flags: Flag::IsGetter as u32, access: Access::Browse, param: "", result: "", description: "" },
+];
+
+pub fn delay_node() -> ShvNode {
+    ShvNode::new(DELAY_METHODS.into(), delay_node_process_request)
+}
+
+async fn delay_node_process_request(req_data: RequestData, rpc_command_sender: Sender<RpcCommand>, state: DeviceState) -> HandlerOutcome {
+    let rq = &req_data.request;
+    if rq.shv_path().unwrap_or_default().is_empty() {
+        match rq.method() {
+            Some(METH_GET_DELAYED) => {
+                let state = state.0.expect("Missing state for delay node");
+                let mut locked_state = state.lock().unwrap();
+                let counter = locked_state.downcast_mut::<i32>().expect("Invalid state type for delay node");
+                let ret_val = { *counter += 1; *counter };
+                drop(locked_state);
+                let mut resp = rq.prepare_response().unwrap_or_default();
+                async_std::task::spawn(async move {
+                    async_std::task::sleep(Duration::from_secs(3)).await;
+                    resp.set_result(ret_val.into());
+                    if let Err(e) = rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await {
+                        error!("delay_node_process_request: Cannot send response ({e})");
+                    }
+                });
+                return HandlerOutcome::Handled;
+            }
+            _ => { }
         }
     }
     HandlerOutcome::NotHandled
