@@ -1,3 +1,6 @@
+// The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
+// struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
+
 use std::any::Any;
 use std::collections::{BTreeMap, HashSet};
 use std::format;
