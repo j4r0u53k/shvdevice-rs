@@ -8,7 +8,7 @@ use shv::metamethod::{Flag, MetaMethod};
 use shv::rpcframe::RpcFrame;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::{metamethod, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::format;
 use std::rc::Rc;
 
@@ -236,14 +236,32 @@ mod tests {
         ShvNode::new(PROPERTY_METHODS).add_route(Route::new(["invalidMethod"], dummy_handler));
     }
 }
+
+/// Helper trait for uniform access to some common methods of BTreeMap<String, V> and HashMap<String, V>
+pub trait StringMapView<V> {
+    fn contains_key_(&self, key: &String) -> bool;
+}
+
+impl<V> StringMapView<V> for BTreeMap<String, V> {
+    fn contains_key_(&self, key: &String) -> bool {
+        self.contains_key(key)
+    }
+}
+
+impl<V> StringMapView<V> for HashMap<String, V> {
+    fn contains_key_(&self, key: &String) -> bool {
+        self.contains_key(key)
+    }
+}
+
 pub fn find_longest_prefix<'a, 'b, V>(
-    map: &'a BTreeMap<String, V>,
+    map: &'a impl StringMapView<V>,
     shv_path: &'b str,
 ) -> Option<(&'b str, &'b str)> {
     let mut path = &shv_path[..];
     let mut rest = "";
     loop {
-        if map.contains_key(path) {
+        if map.contains_key_(&path.to_string()) {
             return Some((path, rest));
         }
         if path.is_empty() {

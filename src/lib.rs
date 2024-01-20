@@ -9,12 +9,13 @@ use async_std::sync::Mutex;
 use duration_str::parse;
 use futures::{select, AsyncReadExt, Future, FutureExt};
 use log::*;
+use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
 use shv::client::{ClientConfig, LoginParams};
 use shv::metamethod::MetaMethod;
 use shv::rpcframe::RpcFrame;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::util::login_from_url;
-use shv::{client, RpcMessage, RpcMessageMetaTags, RpcValue};
+use shv::{client, make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
@@ -47,7 +48,17 @@ pub enum RpcCommand {
         request: RpcMessage,
         response_sender: Sender<RpcFrame>,
     },
+    Subscribe {
+        path: String,
+        // methods: String, // Not implemented
+        notifications_sender: Sender<RpcFrame>,
+    },
+    Unsubscribe {
+        path: String,
+    },
 }
+
+const BROKER_APP_NODE: &str = ".broker/app";
 
 pub enum RequestResult {
     Response(RpcValue),
@@ -177,6 +188,7 @@ impl ShvDevice {
         client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
 
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
+        let mut notification_handlers: HashMap<String, Sender<RpcFrame>> = HashMap::new();
         let (rpc_command_sender, rpc_command_receiver) =
             async_std::channel::unbounded::<RpcCommand>();
         let mut fut_heartbeat_timeout =
@@ -204,7 +216,25 @@ impl ShvDevice {
                                     panic!("request_id {req_id} for async RpcCall has been already registered");
                                 }
                                 rpc_command_sender.send(RpcCommand::SendMessage{ message: request }).await?;
-                            }
+                            },
+                            RpcCommand::Subscribe{path, /* methods, */ notifications_sender} => {
+                                if notification_handlers.insert(path.clone(), notifications_sender).is_some() {
+                                    warn!("Path {} has already been subscribed!", &path);
+                                }
+                                let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
+                                rpc_command_sender
+                                    .send(RpcCommand::SendMessage { message: request })
+                                    .await?;
+                            },
+                            RpcCommand::Unsubscribe{path} => {
+                                if let None = notification_handlers.remove(&path) {
+                                    warn!("No subscription found for path `{}`", &path);
+                                }
+                                let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
+                                rpc_command_sender
+                                    .send(RpcCommand::SendMessage { message: request })
+                                    .await?;
+                            },
                         }
                     },
                     Err(err) => {
@@ -258,11 +288,27 @@ impl ShvDevice {
                         } else if frame.is_response() {
                             if let Some(req_id) = frame.request_id() {
                                 if let Some(response_sender) = pending_rpc_calls.remove(&req_id) {
-                                    response_sender.send(frame).await?;
+                                    if let Err(_) = response_sender.send(frame.clone()).await {
+                                        warn!("Response channel closed before received response: {}", &frame)
+                                    }
                                 }
                             }
                         } else if frame.is_signal() {
-                            warn!("Signal frame handling to be implemented");
+                            if let Some(path) = frame.shv_path() {
+                                    if let Some((subscribed_path, _)) = find_longest_prefix(&notification_handlers, &path) {
+                                        if let Some(notifications_sender) = notification_handlers.get(subscribed_path) {
+                                            let subscribed_path = subscribed_path.to_owned();
+                                            if let Err(_) = notifications_sender.send(frame).await {
+                                                warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
+                                                notification_handlers.remove(&subscribed_path);
+                                                let request = create_subscription_request(&subscribed_path, SubscriptionRequest::Unsubscribe);
+                                                rpc_command_sender
+                                                    .send(RpcCommand::SendMessage { message: request })
+                                                    .await?;
+                                            }
+                                        }
+                                    }
+                            }
                         }
                     }
                     Err(e) => {
@@ -272,4 +318,20 @@ impl ShvDevice {
             }
         }
     }
+}
+
+enum SubscriptionRequest {
+    Subscribe,
+    Unsubscribe,
+}
+
+fn create_subscription_request(path: &str, request_method: SubscriptionRequest) -> RpcMessage {
+    RpcMessage::new_request(
+        BROKER_APP_NODE,
+        match request_method {
+            SubscriptionRequest::Subscribe => METH_SUBSCRIBE,
+            SubscriptionRequest::Unsubscribe => METH_UNSUBSCRIBE,
+        },
+        Some(make_map!("methods" => "", "path" => path).into()),
+    )
 }
