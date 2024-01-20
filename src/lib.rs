@@ -1,23 +1,88 @@
+pub mod appnodes;
 pub mod shvnode;
 
-use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, METH_PING};
+use async_std::future;
 use async_std::io::BufReader;
 use async_std::net::TcpStream;
-use shv::{client, RpcMessage, RpcMessageMetaTags};
-use async_std::future;
-use futures::{AsyncReadExt, select, FutureExt};
+use async_std::sync::Mutex;
+use duration_str::parse;
+use futures::{select, AsyncReadExt, Future, FutureExt};
 use log::*;
-use url::Url;
 use shv::client::{ClientConfig, LoginParams};
+use shv::metamethod::MetaMethod;
 use shv::rpcframe::RpcFrame;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
-use crate::shvnode::{AppDeviceNode, find_longest_prefix, ShvNode, RequestResult, RpcCommand, DeviceState, AppNode, process_local_dir_ls, SIG_CHNG, METH_PING, RequestData};
 use shv::util::login_from_url;
-use duration_str::parse;
+use shv::{client, RpcMessage, RpcMessageMetaTags, RpcValue};
+use std::any::Any;
+use std::collections::{BTreeMap, HashMap};
+use std::pin::Pin;
+use std::sync::Arc;
+use url::Url;
 
-type Sender<K> = async_std::channel::Sender<K>;
-type Receiver<K> = async_std::channel::Receiver<K>;
+pub type Sender<K> = async_std::channel::Sender<K>;
+pub type Receiver<K> = async_std::channel::Receiver<K>;
+
+#[derive(Clone, Default)]
+pub struct DeviceState(pub Option<Arc<Mutex<Box<dyn Any + Send + Sync>>>>);
+
+impl DeviceState {
+    pub fn new<T: Any + Send + Sync>(val: T) -> Self {
+        DeviceState(Some(Arc::new(Mutex::new(Box::new(val)))))
+    }
+}
+
+#[derive(Clone)]
+pub struct RequestData {
+    pub mount_path: String,
+    pub request: RpcMessage,
+}
+
+pub enum RpcCommand {
+    SendMessage {
+        message: RpcMessage,
+    },
+    RpcCall {
+        request: RpcMessage,
+        response_sender: Sender<RpcFrame>,
+    },
+}
+
+pub enum RequestResult {
+    Response(RpcValue),
+    Error(RpcError),
+}
+
+type HandlerOutcome = ();
+
+pub type HandlerFn = Box<
+    dyn Fn(
+        RequestData,
+        Sender<RpcCommand>,
+        DeviceState,
+    ) -> Pin<Box<dyn Future<Output = HandlerOutcome>>>,
+>;
+
+pub struct Route {
+    handler: HandlerFn,
+    methods: Vec<String>,
+}
+
+impl Route {
+    pub fn new<F, O, I>(methods: I, handler: F) -> Self
+    where
+        F: 'static + Fn(RequestData, Sender<RpcCommand>, DeviceState) -> O,
+        O: 'static + Future<Output = HandlerOutcome>,
+        I: IntoIterator,
+        I::Item: Into<String>,
+    {
+        Self {
+            handler: Box::new(move |r, s, d| Box::pin(handler(r, s, d))),
+            methods: methods.into_iter().map(|x| x.into()).collect(),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct ShvDevice {
@@ -26,8 +91,15 @@ pub struct ShvDevice {
 }
 
 impl ShvDevice {
-    pub fn mount(&mut self, path: String, node: ShvNode) -> &mut Self {
-        self.mounts.insert(path, node);
+    pub fn mount<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
+    where
+        P: AsRef<str>,
+        M: Into<Vec<MetaMethod>>,
+        R: Into<Vec<Route>>,
+    {
+        let path = path.as_ref();
+        let node = ShvNode::new(defined_methods).add_routes(routes.into());
+        self.mounts.insert(path.into(), node);
         self
     }
 
@@ -36,11 +108,11 @@ impl ShvDevice {
         self
     }
 
-    pub fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
+    pub fn run(&self, config: &ClientConfig) -> shv::Result<()> {
         async_std::task::block_on(self.try_main_reconnect(config))
     }
 
-    async fn try_main_reconnect(&mut self, config: &ClientConfig) -> shv::Result<()> {
+    async fn try_main_reconnect(&self, config: &ClientConfig) -> shv::Result<()> {
         if let Some(time_str) = &config.reconnect_interval {
             match parse(time_str) {
                 Ok(interval) => {
@@ -49,7 +121,7 @@ impl ShvDevice {
                         match self.try_main(config).await {
                             Ok(_) => {
                                 info!("Finished without error");
-                                return Ok(())
+                                return Ok(());
                             }
                             Err(err) => {
                                 error!("Error in main loop: {err}");
@@ -68,9 +140,13 @@ impl ShvDevice {
         }
     }
 
-    async fn try_main(&mut self, config: &ClientConfig) -> shv::Result<()> {
+    async fn try_main(&self, config: &ClientConfig) -> shv::Result<()> {
         let url = Url::parse(&config.url)?;
-        let (scheme, host, port) = (url.scheme(), url.host_str().unwrap_or_default(), url.port().unwrap_or(3755));
+        let (scheme, host, port) = (
+            url.scheme(),
+            url.host_str().unwrap_or_default(),
+            url.port().unwrap_or(3755),
+        );
         if scheme != "tcp" {
             return Err(format!("Scheme {scheme} is not supported yet.").into());
         }
@@ -87,7 +163,7 @@ impl ShvDevice {
         // login
         let (user, password) = login_from_url(&url);
         let heartbeat_interval = config.heartbeat_interval_duration()?;
-        let login_params = LoginParams{
+        let login_params = LoginParams {
             user,
             password,
             mount_point: (&config.mount.clone().unwrap_or_default()).to_owned(),
@@ -101,8 +177,10 @@ impl ShvDevice {
         client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
 
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
-        let (rpc_command_sender, rpc_command_receiver) = async_std::channel::unbounded::<RpcCommand>();
-        let mut fut_heartbeat_timeout = Box::pin(future::timeout(heartbeat_interval, future::pending::<()>())).fuse();
+        let (rpc_command_sender, rpc_command_receiver) =
+            async_std::channel::unbounded::<RpcCommand>();
+        let mut fut_heartbeat_timeout =
+            Box::pin(future::timeout(heartbeat_interval, future::pending::<()>())).fuse();
 
         loop {
             let fut_receive_frame = frame_reader.receive_frame();
@@ -147,7 +225,7 @@ impl ShvDevice {
                                         None => {
                                             if let Some((mount, path)) = find_longest_prefix(&self.mounts, &shv_path) {
                                                 rpcmsg.set_shvpath(path);
-                                                let node = self.mounts.get_mut(mount).unwrap();
+                                                let node = self.mounts.get(mount).unwrap();
                                                 node.process_request(
                                                     RequestData { mount_path: mount.into(), request: rpcmsg },
                                                     rpc_command_sender.clone(),
@@ -194,8 +272,4 @@ impl ShvDevice {
             }
         }
     }
-
 }
-
-
-

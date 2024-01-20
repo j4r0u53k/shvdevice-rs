@@ -1,10 +1,15 @@
+use std::time::Duration;
 
-use shvdevice::ShvDevice;
-use shvdevice::shvnode::{app_node,app_device_node,delay_node};
 use clap::Parser;
 use log::*;
-use simple_logger::SimpleLogger;
+use shv::metamethod::{Flag, MetaMethod};
+use shv::RpcMessageMetaTags;
 use shv::{client::ClientConfig, util::parse_log_verbosity};
+use shvdevice::appnodes::{
+    app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
+};
+use shvdevice::{DeviceState, RequestData, Route, RpcCommand, Sender, ShvDevice};
+use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
 //#[structopt(name = "device", version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = "SHV call")]
@@ -53,12 +58,65 @@ fn load_client_config(cli_opts: &Opts) -> shv::Result<ClientConfig> {
     } else {
         Default::default()
     };
-    if let Some(url) = &cli_opts.url { config.url = url.clone() }
+    if let Some(url) = &cli_opts.url {
+        config.url = url.clone()
+    }
     config.device_id = cli_opts.device_id.clone();
     config.mount = cli_opts.mount.clone();
     config.reconnect_interval = cli_opts.reconnect_interval.clone();
     config.heartbeat_interval = cli_opts.heartbeat_interval.clone();
     Ok(config)
+}
+
+const METH_GET_DELAYED: &str = "getDelayed";
+
+const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
+    name: METH_GET_DELAYED,
+    flags: Flag::IsGetter as u32,
+    access: shv::metamethod::Access::Browse,
+    param: "",
+    result: "",
+    description: "",
+}];
+
+async fn delay_node_process_request(
+    req_data: RequestData,
+    rpc_command_sender: Sender<RpcCommand>,
+    state: DeviceState,
+) {
+    let rq = &req_data.request;
+    if rq.shv_path().unwrap_or_default().is_empty() {
+        match rq.method() {
+            Some(METH_GET_DELAYED) => {
+                let state = state.0.expect("Missing state for delay node");
+                let mut locked_state = state.lock_arc().await;
+                let counter = locked_state
+                    .downcast_mut::<i32>()
+                    .expect("Invalid state type for delay node");
+                let ret_val = {
+                    *counter += 1;
+                    *counter
+                };
+                drop(locked_state);
+                let mut resp = rq.prepare_response().unwrap_or_default();
+                async_std::task::spawn(async move {
+                    async_std::task::sleep(Duration::from_secs(3)).await;
+                    resp.set_result(ret_val.into());
+                    if let Err(e) = rpc_command_sender
+                        .send(RpcCommand::SendMessage { message: resp })
+                        .await
+                    {
+                        error!("delay_node_process_request: Cannot send response ({e})");
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn delay_node_routes() -> Vec<Route> {
+    [Route::new([METH_GET_DELAYED], delay_node_process_request)].into()
 }
 
 pub(crate) fn main() -> shv::Result<()> {
@@ -74,9 +132,9 @@ pub(crate) fn main() -> shv::Result<()> {
     let counter = -10;
 
     ShvDevice::default()
-        .mount(".app".into(), app_node())
-        .mount(".app/device".into(), app_device_node())
-        .mount("status/delayed".into(), delay_node())
+        .mount(".app", APP_METHODS, app_node_routes())
+        .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
+        .mount("status/delayed", DELAY_METHODS, delay_node_routes())
         .register_state(counter)
         .run(&client_config)
 }
