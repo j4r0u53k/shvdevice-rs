@@ -214,6 +214,27 @@ mod tests {
             Some(vec!["C".to_string(), "D".to_string()])
         );
     }
+
+    async fn dummy_handler(_: RequestData, _: Sender<RpcCommand>, _: DeviceState) {}
+
+    #[test]
+    fn accept_valid_routes() {
+        ShvNode::new(PROPERTY_METHODS)
+            .add_route(Route::new([METH_GET, METH_SET, METH_LS], dummy_handler));
+        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([METH_GET], dummy_handler));
+    }
+
+    #[test]
+    #[should_panic]
+    fn reject_sig_chng_route() {
+        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([SIG_CHNG], dummy_handler));
+    }
+
+    #[test]
+    #[should_panic]
+    fn reject_invalid_method_route() {
+        ShvNode::new(PROPERTY_METHODS).add_route(Route::new(["invalidMethod"], dummy_handler));
+    }
 }
 pub fn find_longest_prefix<'a, 'b, V>(
     map: &'a BTreeMap<String, V>,
@@ -331,7 +352,7 @@ impl ShvNode {
             .send(RpcCommand::SendMessage { message: resp })
             .await
         {
-            error!("process_dir_ls: Cannot send response ({})", e);
+            error!("process_dir_ls: Cannot send response ({e})");
         }
     }
 
