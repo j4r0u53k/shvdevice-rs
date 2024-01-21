@@ -25,6 +25,9 @@ use url::Url;
 pub type Sender<K> = async_std::channel::Sender<K>;
 pub type Receiver<K> = async_std::channel::Receiver<K>;
 
+pub type BroadcastSender<K> = async_broadcast::Sender<K>;
+pub type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
+
 #[derive(Clone, Default)]
 pub struct DeviceState(pub Option<Arc<Mutex<Box<dyn Any + Send + Sync>>>>);
 
@@ -95,13 +98,29 @@ impl Route {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+pub enum DeviceEvent {
+    /// Device core sends this event when connected to a broker
+    Connected(Sender<RpcCommand>),
+}
+
 pub struct ShvDevice {
     mounts: BTreeMap<String, ShvNode>,
     state: DeviceState,
+    event_sender: BroadcastSender<DeviceEvent>,
 }
 
 impl ShvDevice {
+    pub fn new() -> Self {
+        let (mut event_sender, _) = async_broadcast::broadcast(1);
+        event_sender.set_overflow(true);
+        Self {
+            mounts: Default::default(),
+            state: Default::default(),
+            event_sender,
+        }
+    }
+
     pub fn mount<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
     where
         P: AsRef<str>,
@@ -117,6 +136,10 @@ impl ShvDevice {
     pub fn register_state<T: Any + Send + Sync>(&mut self, state: T) -> &mut Self {
         self.state = DeviceState::new(state);
         self
+    }
+
+    pub fn event_receiver(&self) -> async_broadcast::Receiver<DeviceEvent> {
+        self.event_sender.new_receiver()
     }
 
     pub fn run(&self, config: &ClientConfig) -> shv::Result<()> {
@@ -189,8 +212,19 @@ impl ShvDevice {
 
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut notification_handlers: HashMap<String, Sender<RpcFrame>> = HashMap::new();
+
         let (rpc_command_sender, rpc_command_receiver) =
             async_std::channel::unbounded::<RpcCommand>();
+
+        let event_sender = &self.event_sender;
+        if !event_sender.is_closed() {
+            if let Err(err) =
+                event_sender.try_broadcast(DeviceEvent::Connected(rpc_command_sender.clone()))
+            {
+                error!("Device event send error: {err}");
+            }
+        }
+
         let mut fut_heartbeat_timeout =
             Box::pin(future::timeout(heartbeat_interval, future::pending::<()>())).fuse();
 

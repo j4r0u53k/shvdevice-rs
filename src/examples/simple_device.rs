@@ -131,7 +131,9 @@ pub(crate) fn main() -> shv::Result<()> {
 
     let counter = -10;
 
-    ShvDevice::default()
+    let mut device = ShvDevice::new();
+    let _device_event_rx = device.event_receiver();
+    device
         .mount(".app", APP_METHODS, app_node_routes())
         .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
         .mount("status/delayed", DELAY_METHODS, delay_node_routes())

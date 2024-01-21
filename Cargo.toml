@@ -23,3 +23,4 @@ clap = { version = "4.4.12", features = ["derive"] }
 log = "0.4.20"
 simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
 duration-str = "0.7.1"
+async-broadcast = "0.6.0"
