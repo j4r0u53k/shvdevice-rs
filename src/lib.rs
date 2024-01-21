@@ -334,19 +334,18 @@ impl ShvDevice {
                             }
                         } else if frame.is_signal() {
                             if let Some(path) = frame.shv_path() {
-                                    if let Some((subscribed_path, _)) = find_longest_prefix(&notification_handlers, &path) {
-                                        if let Some(notifications_sender) = notification_handlers.get(subscribed_path) {
-                                            let subscribed_path = subscribed_path.to_owned();
-                                            if let Err(_) = notifications_sender.send(frame).await {
-                                                warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
-                                                notification_handlers.remove(&subscribed_path);
-                                                let request = create_subscription_request(&subscribed_path, SubscriptionRequest::Unsubscribe);
-                                                rpc_command_sender
-                                                    .send(RpcCommand::SendMessage { message: request })
-                                                    .await?;
-                                            }
-                                        }
+                                if let Some((subscribed_path, _)) = find_longest_prefix(&notification_handlers, &path) {
+                                    let notifications_sender = notification_handlers.get(subscribed_path).unwrap();
+                                    let subscribed_path = subscribed_path.to_owned();
+                                    if let Err(_) = notifications_sender.send(frame).await {
+                                        warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
+                                        notification_handlers.remove(&subscribed_path);
+                                        let request = create_subscription_request(&subscribed_path, SubscriptionRequest::Unsubscribe);
+                                        rpc_command_sender
+                                            .send(RpcCommand::SendMessage { message: request })
+                                            .await?;
                                     }
+                                }
                             }
                         }
                     }
