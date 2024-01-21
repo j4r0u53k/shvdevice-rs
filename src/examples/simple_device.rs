@@ -86,32 +86,30 @@ async fn delay_node_process_request(
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
-        match rq.method() {
-            Some(METH_GET_DELAYED) => {
-                let state = state.0.expect("Missing state for delay node");
-                let mut locked_state = state.lock_arc().await;
-                let counter = locked_state
-                    .downcast_mut::<i32>()
-                    .expect("Invalid state type for delay node");
-                let ret_val = {
-                    *counter += 1;
-                    *counter
-                };
-                drop(locked_state);
-                let mut resp = rq.prepare_response().unwrap_or_default();
-                async_std::task::spawn(async move {
-                    async_std::task::sleep(Duration::from_secs(3)).await;
-                    resp.set_result(ret_val.into());
-                    if let Err(e) = rpc_command_sender
-                        .send(RpcCommand::SendMessage { message: resp })
-                        .await
-                    {
-                        error!("delay_node_process_request: Cannot send response ({e})");
-                    }
-                });
+        assert_eq!(rq.method(), Some(METH_GET_DELAYED));
+        let mut locked_state = state
+            .expect("Missing state for delay node")
+            .lock_arc()
+            .await;
+        let counter = locked_state
+            .downcast_mut::<i32>()
+            .expect("Invalid state type for delay node");
+        let ret_val = {
+            *counter += 1;
+            *counter
+        };
+        drop(locked_state);
+        let mut resp = rq.prepare_response().unwrap_or_default();
+        async_std::task::spawn(async move {
+            async_std::task::sleep(Duration::from_secs(3)).await;
+            resp.set_result(ret_val.into());
+            if let Err(e) = rpc_command_sender
+                .send(RpcCommand::SendMessage { message: resp })
+                .await
+            {
+                error!("delay_node_process_request: Cannot send response ({e})");
             }
-            _ => {}
-        }
+        });
     }
 }
 
@@ -129,7 +127,7 @@ pub(crate) fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = -10;
+    let counter = DeviceState::new(-10);
 
     let mut device = ShvDevice::new();
     let _device_event_rx = device.event_receiver();

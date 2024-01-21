@@ -28,12 +28,17 @@ pub type Receiver<K> = async_std::channel::Receiver<K>;
 pub type BroadcastSender<K> = async_broadcast::Sender<K>;
 pub type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
 
+type DeviceStateInternal = Arc<Mutex<dyn Any + Send + Sync>>;
 #[derive(Clone, Default)]
-pub struct DeviceState(pub Option<Arc<Mutex<Box<dyn Any + Send + Sync>>>>);
+pub struct DeviceState(Option<DeviceStateInternal>);
 
 impl DeviceState {
     pub fn new<T: Any + Send + Sync>(val: T) -> Self {
-        DeviceState(Some(Arc::new(Mutex::new(Box::new(val)))))
+        DeviceState(Some(Arc::new(Mutex::new(val))))
+    }
+
+    pub fn expect(self, msg: &str) -> DeviceStateInternal {
+        self.0.expect(msg)
     }
 }
 
@@ -133,8 +138,8 @@ impl ShvDevice {
         self
     }
 
-    pub fn register_state<T: Any + Send + Sync>(&mut self, state: T) -> &mut Self {
-        self.state = DeviceState::new(state);
+    pub fn register_state(&mut self, state: DeviceState) -> &mut Self {
+        self.state = state;
         self
     }
 
