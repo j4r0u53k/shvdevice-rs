@@ -216,7 +216,7 @@ impl ShvDevice {
         client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
 
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
-        let mut notification_handlers: HashMap<String, Sender<RpcFrame>> = HashMap::new();
+        let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
 
         let (rpc_command_sender, rpc_command_receiver) =
             async_std::channel::unbounded::<RpcCommand>();
@@ -257,7 +257,7 @@ impl ShvDevice {
                                 rpc_command_sender.send(RpcCommand::SendMessage{ message: request }).await?;
                             },
                             RpcCommand::Subscribe{path, /* methods, */ notifications_sender} => {
-                                if notification_handlers.insert(path.clone(), notifications_sender).is_some() {
+                                if subscriptions.insert(path.clone(), notifications_sender).is_some() {
                                     warn!("Path {} has already been subscribed!", &path);
                                 }
                                 let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
@@ -266,7 +266,7 @@ impl ShvDevice {
                                     .await?;
                             },
                             RpcCommand::Unsubscribe{path} => {
-                                if let None = notification_handlers.remove(&path) {
+                                if let None = subscriptions.remove(&path) {
                                     warn!("No subscription found for path `{}`", &path);
                                 }
                                 let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
@@ -334,12 +334,12 @@ impl ShvDevice {
                             }
                         } else if frame.is_signal() {
                             if let Some(path) = frame.shv_path() {
-                                if let Some((subscribed_path, _)) = find_longest_prefix(&notification_handlers, &path) {
-                                    let notifications_sender = notification_handlers.get(subscribed_path).unwrap();
+                                if let Some((subscribed_path, _)) = find_longest_prefix(&subscriptions, &path) {
+                                    let notifications_sender = subscriptions.get(subscribed_path).unwrap();
                                     let subscribed_path = subscribed_path.to_owned();
                                     if let Err(_) = notifications_sender.send(frame).await {
                                         warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
-                                        notification_handlers.remove(&subscribed_path);
+                                        subscriptions.remove(&subscribed_path);
                                         let request = create_subscription_request(&subscribed_path, SubscriptionRequest::Unsubscribe);
                                         rpc_command_sender
                                             .send(RpcCommand::SendMessage { message: request })
