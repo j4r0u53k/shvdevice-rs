@@ -82,23 +82,21 @@ const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
 async fn delay_node_process_request(
     req_data: RequestData,
     rpc_command_sender: Sender<RpcCommand>,
-    state: DeviceState,
+    state: &mut DeviceState<i32>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(rq.method(), Some(METH_GET_DELAYED));
-        let mut locked_state = state
-            .expect("Missing state for delay node")
-            .lock_arc()
-            .await;
-        let counter = locked_state
-            .downcast_mut::<i32>()
-            .expect("Invalid state type for delay node");
+        let locked_state = state.as_mut().expect("Missing state for delay node");
+        // .lock_arc()
+        // .await;
+        let counter = locked_state;
+        // .expect("Invalid state type for delay node");
         let ret_val = {
             *counter += 1;
             *counter
         };
-        drop(locked_state);
+        // drop(locked_state);
         let mut resp = rq.prepare_response().unwrap_or_default();
         async_std::task::spawn(async move {
             async_std::task::sleep(Duration::from_secs(3)).await;
@@ -113,8 +111,12 @@ async fn delay_node_process_request(
     }
 }
 
-fn delay_node_routes() -> Vec<Route> {
-    [Route::new([METH_GET_DELAYED], delay_node_process_request)].into()
+fn delay_node_routes() -> Vec<Route<i32>> {
+    [Route::new(
+        [METH_GET_DELAYED],
+        shvdevice::handler!(delay_node_process_request),
+    )]
+    .into()
 }
 
 pub(crate) fn main() -> shv::Result<()> {
@@ -127,7 +129,7 @@ pub(crate) fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = DeviceState::new(-10);
+    let counter = DeviceState::Some(-10);
 
     let mut device = ShvDevice::new();
     let _device_event_rx = device.event_receiver();

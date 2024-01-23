@@ -7,6 +7,7 @@ use async_std::io::BufReader;
 use async_std::net::TcpStream;
 use async_std::sync::Mutex;
 use duration_str::parse;
+use futures::future::BoxFuture;
 use futures::{select, AsyncReadExt, Future, FutureExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
@@ -27,20 +28,6 @@ pub type Receiver<K> = async_std::channel::Receiver<K>;
 
 pub type BroadcastSender<K> = async_broadcast::Sender<K>;
 pub type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
-
-type DeviceStateInternal = Arc<Mutex<dyn Any + Send + Sync>>;
-#[derive(Clone, Default)]
-pub struct DeviceState(Option<DeviceStateInternal>);
-
-impl DeviceState {
-    pub fn new<T: Any + Send + Sync>(val: T) -> Self {
-        DeviceState(Some(Arc::new(Mutex::new(val))))
-    }
-
-    pub fn expect(self, msg: &str) -> DeviceStateInternal {
-        self.0.expect(msg)
-    }
-}
 
 #[derive(Clone)]
 pub struct RequestData {
@@ -73,31 +60,32 @@ pub enum RequestResult {
     Error(RpcError),
 }
 
-type HandlerOutcome = ();
+pub type DeviceState<S> = Option<S>;
 
-pub type HandlerFn = Box<
-    dyn Fn(
-        RequestData,
-        Sender<RpcCommand>,
-        DeviceState,
-    ) -> Pin<Box<dyn Future<Output = HandlerOutcome>>>,
+pub type HandlerFn<S> = Box<
+    dyn for<'a> Fn(RequestData, Sender<RpcCommand>, &'a mut DeviceState<S>) -> BoxFuture<'_, ()>,
 >;
 
-pub struct Route {
-    handler: HandlerFn,
+pub struct Route<S> {
+    handler: HandlerFn<S>,
     methods: Vec<String>,
 }
 
-impl Route {
-    pub fn new<F, O, I>(methods: I, handler: F) -> Self
+#[macro_export]
+macro_rules! handler {
+    ($func:ident) => {
+        Box::new(move |r, s, d| Box::pin($func(r, s, d)))
+    };
+}
+
+impl<S> Route<S> {
+    pub fn new<I>(methods: I, handler: HandlerFn<S>) -> Self
     where
-        F: 'static + Fn(RequestData, Sender<RpcCommand>, DeviceState) -> O,
-        O: 'static + Future<Output = HandlerOutcome>,
         I: IntoIterator,
         I::Item: Into<String>,
     {
         Self {
-            handler: Box::new(move |r, s, d| Box::pin(handler(r, s, d))),
+            handler,
             methods: methods.into_iter().map(|x| x.into()).collect(),
         }
     }
@@ -109,13 +97,13 @@ pub enum DeviceEvent {
     Connected(Sender<RpcCommand>),
 }
 
-pub struct ShvDevice {
-    mounts: BTreeMap<String, ShvNode>,
-    state: DeviceState,
+pub struct ShvDevice<S> {
+    mounts: BTreeMap<String, ShvNode<S>>,
+    state: DeviceState<S>,
     event_sender: BroadcastSender<DeviceEvent>,
 }
 
-impl ShvDevice {
+impl<S> ShvDevice<S> {
     pub fn new() -> Self {
         let (mut event_sender, _) = async_broadcast::broadcast(1);
         event_sender.set_overflow(true);
@@ -130,7 +118,7 @@ impl ShvDevice {
     where
         P: AsRef<str>,
         M: Into<Vec<MetaMethod>>,
-        R: Into<Vec<Route>>,
+        R: Into<Vec<Route<S>>>,
     {
         let path = path.as_ref();
         let node = ShvNode::new(defined_methods).add_routes(routes.into());
@@ -138,7 +126,7 @@ impl ShvDevice {
         self
     }
 
-    pub fn register_state(&mut self, state: DeviceState) -> &mut Self {
+    pub fn register_state(&mut self, state: DeviceState<S>) -> &mut Self {
         self.state = state;
         self
     }
@@ -147,11 +135,11 @@ impl ShvDevice {
         self.event_sender.new_receiver()
     }
 
-    pub fn run(&self, config: &ClientConfig) -> shv::Result<()> {
+    pub fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
         async_std::task::block_on(self.try_main_reconnect(config))
     }
 
-    async fn try_main_reconnect(&self, config: &ClientConfig) -> shv::Result<()> {
+    async fn try_main_reconnect(&mut self, config: &ClientConfig) -> shv::Result<()> {
         if let Some(time_str) = &config.reconnect_interval {
             match parse(time_str) {
                 Ok(interval) => {
@@ -179,7 +167,7 @@ impl ShvDevice {
         }
     }
 
-    async fn try_main(&self, config: &ClientConfig) -> shv::Result<()> {
+    async fn try_main(&mut self, config: &ClientConfig) -> shv::Result<()> {
         let url = Url::parse(&config.url)?;
         let (scheme, host, port) = (
             url.scheme(),
@@ -298,7 +286,7 @@ impl ShvDevice {
                                                 node.process_request(
                                                     RequestData { mount_path: mount.into(), request: rpcmsg },
                                                     rpc_command_sender.clone(),
-                                                    self.state.clone()).await;
+                                                    &mut self.state).await;
                                             } else {
                                                 let method = frame.method().unwrap_or_default();
                                                 resp.set_error(RpcError::new(RpcErrorCode::MethodNotFound, &format!("Invalid shv path {}:{}()", shv_path, method)));

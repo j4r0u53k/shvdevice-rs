@@ -215,7 +215,7 @@ mod tests {
         );
     }
 
-    async fn dummy_handler(_: RequestData, _: Sender<RpcCommand>, _: DeviceState) {}
+    async fn dummy_handler<S>(_: RequestData, _: Sender<RpcCommand>, _: DeviceState<S>) {}
 
     #[test]
     fn accept_valid_routes() {
@@ -278,12 +278,12 @@ pub fn find_longest_prefix<'a, 'b, V>(
     None
 }
 
-pub struct ShvNode {
+pub struct ShvNode<S> {
     defined_methods: Vec<MetaMethod>,
-    method_handlers: BTreeMap<String, Rc<HandlerFn>>,
+    method_handlers: BTreeMap<String, Rc<HandlerFn<S>>>,
 }
 
-impl ShvNode {
+impl<S> ShvNode<S> {
     pub fn new<T: Into<Vec<MetaMethod>>>(methods: T) -> Self {
         ShvNode {
             defined_methods: methods.into(),
@@ -291,14 +291,14 @@ impl ShvNode {
         }
     }
 
-    pub fn add_routes(mut self, routes: Vec<Route>) -> Self {
+    pub fn add_routes(mut self, routes: Vec<Route<S>>) -> Self {
         for route in routes {
             self.add_route(route);
         }
         self
     }
 
-    pub fn add_route(&mut self, route: Route) -> &mut Self {
+    pub fn add_route(&mut self, route: Route<S>) -> &mut Self {
         let handler = Rc::new(route.handler);
         for m in &route.methods {
             self.methods()
@@ -339,17 +339,12 @@ impl ShvNode {
         &self,
         req_data: RequestData,
         rpc_command_sender: Sender<RpcCommand>,
-        device_state: DeviceState,
+        device_state: &mut DeviceState<S>,
     ) {
         let rq = &req_data.request;
         if let Some(method) = rq.method() {
             if let Some(handler) = self.method_handlers.get(method) {
-                handler(
-                    req_data.clone(),
-                    rpc_command_sender.clone(),
-                    device_state.clone(),
-                )
-                .await;
+                handler(req_data.clone(), rpc_command_sender.clone(), device_state).await;
             } else {
                 self.process_dir_ls(rq, rpc_command_sender).await;
             }
