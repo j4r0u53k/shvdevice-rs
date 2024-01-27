@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::{DeviceState, HandlerFn, RequestData, RequestResult, Route, RpcCommand, Sender};
+use crate::{HandlerFn, RequestData, RequestResult, Route, RpcCommand, Sender};
 use log::{error, warn};
 use shv::metamethod::Access;
 use shv::metamethod::{Flag, MetaMethod};
@@ -191,6 +191,8 @@ pub fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<V
 }
 #[cfg(test)]
 mod tests {
+    use crate::handler;
+
     use super::*;
 
     #[test]
@@ -215,25 +217,25 @@ mod tests {
         );
     }
 
-    async fn dummy_handler<S>(_: RequestData, _: Sender<RpcCommand>, _: DeviceState<S>) {}
+    async fn dummy_handler(_: RequestData, _: Sender<RpcCommand>, _: &mut Option<()>) {}
 
     #[test]
     fn accept_valid_routes() {
         ShvNode::new(PROPERTY_METHODS)
-            .add_route(Route::new([METH_GET, METH_SET, METH_LS], dummy_handler));
-        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([METH_GET], dummy_handler));
+            .add_route(Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler)));
+        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([METH_GET], handler!(dummy_handler)));
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
-        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([SIG_CHNG], dummy_handler));
+        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([SIG_CHNG], handler!(dummy_handler)));
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        ShvNode::new(PROPERTY_METHODS).add_route(Route::new(["invalidMethod"], dummy_handler));
+        ShvNode::new(PROPERTY_METHODS).add_route(Route::new(["invalidMethod"], handler!(dummy_handler)));
     }
 }
 
@@ -339,7 +341,7 @@ impl<S> ShvNode<S> {
         &self,
         req_data: RequestData,
         rpc_command_sender: Sender<RpcCommand>,
-        device_state: &mut DeviceState<S>,
+        device_state: &mut Option<S>,
     ) {
         let rq = &req_data.request;
         if let Some(method) = rq.method() {

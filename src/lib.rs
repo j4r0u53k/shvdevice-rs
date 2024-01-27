@@ -56,10 +56,8 @@ pub enum RequestResult {
     Error(RpcError),
 }
 
-pub type DeviceState<S> = Option<S>;
-
 pub type HandlerFn<S> = Box<
-    dyn for<'a> Fn(RequestData, Sender<RpcCommand>, &'a mut DeviceState<S>) -> LocalBoxFuture<'_, ()>,
+    dyn for<'a> Fn(RequestData, Sender<RpcCommand>, &'a mut Option<S>) -> LocalBoxFuture<'_, ()>,
 >;
 
 pub struct Route<S> {
@@ -95,7 +93,7 @@ pub enum DeviceEvent {
 
 pub struct ShvDevice<S> {
     mounts: BTreeMap<String, ShvNode<S>>,
-    state: DeviceState<S>,
+    state: Option<S>,
     event_sender: BroadcastSender<DeviceEvent>,
 }
 
@@ -122,8 +120,8 @@ impl<S> ShvDevice<S> {
         self
     }
 
-    pub fn register_state(&mut self, state: DeviceState<S>) -> &mut Self {
-        self.state = state;
+    pub fn register_state(&mut self, state: S) -> &mut Self {
+        self.state = Some(state);
         self
     }
 

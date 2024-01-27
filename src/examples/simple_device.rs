@@ -10,7 +10,7 @@ use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shvdevice::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
-use shvdevice::{DeviceState, RequestData, Route, RpcCommand, Sender, ShvDevice};
+use shvdevice::{RequestData, Route, RpcCommand, Sender, ShvDevice};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -86,7 +86,7 @@ struct State(Arc<Mutex<i32>>);
 async fn delay_node_process_request(
     req_data: RequestData,
     rpc_command_sender: Sender<RpcCommand>,
-    state: &mut DeviceState<State>,
+    state: &mut Option<State>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
@@ -130,7 +130,7 @@ pub(crate) fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = DeviceState::Some(State(Arc::new(Mutex::new(-10))));
+    let counter = State(Arc::new(Mutex::new(-10)));
 
     let mut device = ShvDevice::new();
     let _device_event_rx = device.event_receiver();

@@ -1,5 +1,5 @@
 use crate::shvnode::METH_PING;
-use crate::{DeviceState, RequestData, Route, RpcCommand, Sender};
+use crate::{RequestData, Route, RpcCommand, Sender};
 use log::error;
 use shv::metamethod::{Access, Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcValue};
@@ -60,7 +60,7 @@ const APP_NODE: AppNode = AppNode {
 async fn app_node_process_request<S>(
     req_data: RequestData,
     rpc_command_sender: Sender<RpcCommand>,
-    _device_state: &mut DeviceState<S>,
+    _device_state: &mut Option<S>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
@@ -139,7 +139,7 @@ const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
 async fn app_device_node_process_request<S>(
     req_data: RequestData,
     rpc_command_sender: Sender<RpcCommand>,
-    _device_state: &mut DeviceState<S>,
+    _device_state: &mut Option<S>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
