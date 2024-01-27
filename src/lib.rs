@@ -5,10 +5,9 @@ use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, METH_PI
 use async_std::future;
 use async_std::io::BufReader;
 use async_std::net::TcpStream;
-use async_std::sync::Mutex;
 use duration_str::parse;
-use futures::future::BoxFuture;
-use futures::{select, AsyncReadExt, Future, FutureExt};
+use futures::future::{LocalBoxFuture};
+use futures::{select, AsyncReadExt, FutureExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
 use shv::client::{ClientConfig, LoginParams};
@@ -17,10 +16,7 @@ use shv::rpcframe::RpcFrame;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::util::login_from_url;
 use shv::{client, make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
-use std::pin::Pin;
-use std::sync::Arc;
 use url::Url;
 
 pub type Sender<K> = async_std::channel::Sender<K>;
@@ -63,7 +59,7 @@ pub enum RequestResult {
 pub type DeviceState<S> = Option<S>;
 
 pub type HandlerFn<S> = Box<
-    dyn for<'a> Fn(RequestData, Sender<RpcCommand>, &'a mut DeviceState<S>) -> BoxFuture<'_, ()>,
+    dyn for<'a> Fn(RequestData, Sender<RpcCommand>, &'a mut DeviceState<S>) -> LocalBoxFuture<'_, ()>,
 >;
 
 pub struct Route<S> {

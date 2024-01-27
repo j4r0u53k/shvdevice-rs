@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_std::sync::Mutex;
 use clap::Parser;
 use log::*;
 use shv::metamethod::{Flag, MetaMethod};
@@ -79,26 +81,25 @@ const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
     description: "",
 }];
 
+struct State(Arc<Mutex<i32>>);
+
 async fn delay_node_process_request(
     req_data: RequestData,
     rpc_command_sender: Sender<RpcCommand>,
-    state: &mut DeviceState<i32>,
+    state: &mut DeviceState<State>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(rq.method(), Some(METH_GET_DELAYED));
-        let locked_state = state.as_mut().expect("Missing state for delay node");
-        // .lock_arc()
-        // .await;
-        let counter = locked_state;
-        // .expect("Invalid state type for delay node");
-        let ret_val = {
-            *counter += 1;
-            *counter
-        };
-        // drop(locked_state);
+        let mut counter = state.as_mut().expect("Missing state for delay node")
+            .0.lock_arc().await;
         let mut resp = rq.prepare_response().unwrap_or_default();
         async_std::task::spawn(async move {
+            let ret_val = {
+                *counter += 1;
+                *counter
+            };
+            drop(counter);
             async_std::task::sleep(Duration::from_secs(3)).await;
             resp.set_result(ret_val.into());
             if let Err(e) = rpc_command_sender
@@ -111,7 +112,7 @@ async fn delay_node_process_request(
     }
 }
 
-fn delay_node_routes() -> Vec<Route<i32>> {
+fn delay_node_routes() -> Vec<Route<State>> {
     [Route::new(
         [METH_GET_DELAYED],
         shvdevice::handler!(delay_node_process_request),
@@ -129,7 +130,7 @@ pub(crate) fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = DeviceState::Some(-10);
+    let counter = DeviceState::Some(State(Arc::new(Mutex::new(-10))));
 
     let mut device = ShvDevice::new();
     let _device_event_rx = device.event_receiver();

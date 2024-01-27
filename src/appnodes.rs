@@ -84,7 +84,7 @@ async fn app_node_process_request<S>(
     }
 }
 
-pub fn app_node_routes<S: Send>() -> Vec<Route<S>> {
+pub fn app_node_routes<S>() -> Vec<Route<S>> {
     [Route::new(
         [
             METH_SHV_VERSION_MAJOR,
@@ -165,7 +165,7 @@ async fn app_device_node_process_request<S>(
     }
 }
 
-pub fn app_device_node_routes<S: Send>() -> Vec<Route<S>> {
+pub fn app_device_node_routes<S>() -> Vec<Route<S>> {
     [Route::new(
         [METH_NAME, METH_VERSION, METH_SERIAL_NUMBER],
         crate::handler!(app_device_node_process_request),
