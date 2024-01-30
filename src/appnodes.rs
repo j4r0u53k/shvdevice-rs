@@ -1,5 +1,5 @@
 use crate::shvnode::METH_PING;
-use crate::{RequestData, Route, RpcCommand, Sender};
+use crate::{RequestData, Route, DeviceCommand, Sender};
 use log::error;
 use shv::metamethod::{Access, Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcValue};
@@ -59,7 +59,7 @@ const APP_NODE: AppNode = AppNode {
 
 async fn app_node_process_request<S>(
     req_data: RequestData,
-    rpc_command_sender: Sender<RpcCommand>,
+    rpc_command_sender: Sender<DeviceCommand>,
     _device_state: &mut Option<S>,
 ) {
     let rq = &req_data.request;
@@ -75,7 +75,7 @@ async fn app_node_process_request<S>(
         if let Some(val) = resp_value {
             resp.set_result(val);
             if let Err(e) = rpc_command_sender
-                .send(RpcCommand::SendMessage { message: resp })
+                .send(DeviceCommand::SendMessage { message: resp })
                 .await
             {
                 error!("app_node_process_request: Cannot send response ({e})");
@@ -138,7 +138,7 @@ const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
 
 async fn app_device_node_process_request<S>(
     req_data: RequestData,
-    rpc_command_sender: Sender<RpcCommand>,
+    rpc_command_sender: Sender<DeviceCommand>,
     _device_state: &mut Option<S>,
 ) {
     let rq = &req_data.request;
@@ -156,7 +156,7 @@ async fn app_device_node_process_request<S>(
         if let Some(val) = resp_value {
             resp.set_result(val);
             if let Err(e) = rpc_command_sender
-                .send(RpcCommand::SendMessage { message: resp })
+                .send(DeviceCommand::SendMessage { message: resp })
                 .await
             {
                 error!("app_device_node_process_request: Cannot send response ({e})");

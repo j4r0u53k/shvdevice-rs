@@ -6,7 +6,7 @@ use async_std::future;
 use async_std::io::BufReader;
 use async_std::net::TcpStream;
 use duration_str::parse;
-use futures::future::{LocalBoxFuture};
+use futures::future::{LocalBoxFuture, select};
 use futures::{select, AsyncReadExt, FutureExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
@@ -31,7 +31,7 @@ pub struct RequestData {
     pub request: RpcMessage,
 }
 
-pub enum RpcCommand {
+pub enum DeviceCommand {
     SendMessage {
         message: RpcMessage,
     },
@@ -57,7 +57,7 @@ pub enum RequestResult {
 }
 
 pub type HandlerFn<S> = Box<
-    dyn for<'a> Fn(RequestData, Sender<RpcCommand>, &'a mut Option<S>) -> LocalBoxFuture<'_, ()>,
+    dyn for<'a> Fn(RequestData, Sender<DeviceCommand>, &'a mut Option<S>) -> LocalBoxFuture<'_, ()>,
 >;
 
 pub struct Route<S> {
@@ -87,24 +87,36 @@ impl<S> Route<S> {
 
 #[derive(Clone)]
 pub enum DeviceEvent {
+    Started(Sender<DeviceCommand>),
     /// Device core sends this event when connected to a broker
-    Connected(Sender<RpcCommand>),
+    Connected,
+    Disconnected,
+}
+
+enum ConnectionEvent {
+    RpcFrameReceived(RpcFrame),
+    Connected(Sender<ConnectionCommand>),
+    Disconnected,
+}
+
+enum ConnectionCommand {
+    SendMessage(RpcMessage),
 }
 
 pub struct ShvDevice<S> {
     mounts: BTreeMap<String, ShvNode<S>>,
     state: Option<S>,
-    event_sender: BroadcastSender<DeviceEvent>,
+    device_event_channel: (BroadcastSender<DeviceEvent>, BroadcastReceiver<DeviceEvent>),
 }
 
 impl<S> ShvDevice<S> {
     pub fn new() -> Self {
-        let (mut event_sender, _) = async_broadcast::broadcast(1);
-        event_sender.set_overflow(true);
+        let mut device_event_channel = async_broadcast::broadcast(10);
+        device_event_channel.0.set_overflow(true);
         Self {
             mounts: Default::default(),
             state: Default::default(),
-            event_sender,
+            device_event_channel,
         }
     }
 
@@ -125,21 +137,200 @@ impl<S> ShvDevice<S> {
         self
     }
 
-    pub fn event_receiver(&self) -> async_broadcast::Receiver<DeviceEvent> {
-        self.event_sender.new_receiver()
+    pub fn event_receiver(&self) -> BroadcastReceiver<DeviceEvent> {
+        self.device_event_channel.1.new_receiver()
     }
 
     pub fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
-        async_std::task::block_on(self.try_main_reconnect(config))
+        let (conn_evt_tx, conn_evt_rx) = async_std::channel::unbounded::<ConnectionEvent>();
+        async_std::task::spawn(connection_task(config.clone(), conn_evt_tx));
+        async_std::task::block_on(self.device_loop(conn_evt_rx))
     }
 
-    async fn try_main_reconnect(&mut self, config: &ClientConfig) -> shv::Result<()> {
+
+    async fn process_rpc_frame(
+        mounts: &mut BTreeMap<String, ShvNode<S>>,
+        state: &mut Option<S>,
+        device_cmd_sender: &Sender<DeviceCommand>,
+        pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
+        subscriptions: &mut HashMap<String, Sender<RpcFrame>>,
+        frame: RpcFrame) -> shv::Result<()>
+    {
+        if frame.is_request() {
+            if let Ok(mut rpcmsg) = frame.to_rpcmesage() {
+                if let Ok(mut resp) = rpcmsg.prepare_response() {
+                    let shv_path = frame.shv_path().unwrap_or_default();
+                    let local_result = process_local_dir_ls(mounts, &frame);
+                    match local_result {
+                        None => {
+                            if let Some((mount, path)) = find_longest_prefix(mounts, &shv_path) {
+                                rpcmsg.set_shvpath(path);
+                                let node = mounts.get(mount).unwrap();
+                                node.process_request(
+                                    RequestData { mount_path: mount.into(), request: rpcmsg },
+                                    device_cmd_sender.clone(),
+                                    state).await;
+                            } else {
+                                let method = frame.method().unwrap_or_default();
+                                resp.set_error(RpcError::new(RpcErrorCode::MethodNotFound, &format!("Invalid shv path {}:{}()", shv_path, method)));
+                                device_cmd_sender.send(DeviceCommand::SendMessage { message: resp }).await?;
+                            }
+                        }
+                        Some(result) => {
+                            match result {
+                                RequestResult::Response(r) => {
+                                    resp.set_result(r);
+                                    device_cmd_sender.send(DeviceCommand::SendMessage { message: resp }).await?;
+                                }
+                                RequestResult::Error(e) => {
+                                    resp.set_error(e);
+                                    device_cmd_sender.send(DeviceCommand::SendMessage { message: resp }).await?;
+                                }
+                            }
+                        }
+                    };
+                } else {
+                    warn!("Invalid request frame received.");
+                }
+            } else {
+                warn!("Invalid shv request");
+            }
+        } else if frame.is_response() {
+            if let Some(req_id) = frame.request_id() {
+                if let Some(response_sender) = pending_rpc_calls.remove(&req_id) {
+                    if let Err(_) = response_sender.send(frame.clone()).await {
+                        warn!("Response channel closed before received response: {}", &frame)
+                    }
+                }
+            }
+        } else if frame.is_signal() {
+            if let Some(path) = frame.shv_path() {
+                if let Some((subscribed_path, _)) = find_longest_prefix(subscriptions, &path) {
+                    let notifications_sender = subscriptions.get(subscribed_path).unwrap();
+                    let subscribed_path = subscribed_path.to_owned();
+                    if let Err(_) = notifications_sender.send(frame).await {
+                        warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
+                        subscriptions.remove(&subscribed_path);
+                        let request = create_subscription_request(&subscribed_path, SubscriptionRequest::Unsubscribe);
+                        device_cmd_sender
+                            .send(DeviceCommand::SendMessage { message: request })
+                            .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn device_loop(&mut self, conn_event_receiver: Receiver<ConnectionEvent>) -> shv::Result<()> {
+        let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
+        let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
+
+        let (device_cmd_sender, device_cmd_receiver) =
+            async_std::channel::unbounded::<DeviceCommand>();
+        let device_event_sender = self.device_event_channel.0.clone();
+        let mut conn_cmd_sender: Option<Sender<ConnectionCommand>> = None;
+
+        if !device_event_sender.is_closed() {
+            info!("device event start broadcast");
+            if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Started(device_cmd_sender.clone())) {
+                error!("Device event `Started` broadcast error: {err}");
+            }
+        }
+
+        loop {
+            select! {
+                device_cmd_result = device_cmd_receiver.recv().fuse() => match device_cmd_result {
+                    Ok(device_cmd) => {
+                        use DeviceCommand::*;
+                        match device_cmd {
+                            SendMessage{message} => {
+                                if let Some(ref conn_cmd_sender) = conn_cmd_sender {
+                                    if let Err(e) = conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await {
+                                        error!("Cannot send message through ConnectionCommand channel: {e}");
+                                    }
+                                }
+                            },
+                            RpcCall{request, response_sender} => {
+                                let req_id = request.request_id().expect("request_id in the request of a RpcCall must be set");
+                                if pending_rpc_calls.insert(req_id, response_sender).is_some() {
+                                    panic!("request_id {req_id} for async RpcCall has been already registered");
+                                }
+                                device_cmd_sender.send(SendMessage{ message: request }).await?;
+                            },
+                            Subscribe{path, /* methods, */ notifications_sender} => {
+                                if subscriptions.insert(path.clone(), notifications_sender).is_some() {
+                                    warn!("Path {} has already been subscribed!", &path);
+                                }
+                                let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
+                                device_cmd_sender
+                                    .send(SendMessage { message: request })
+                                    .await
+                                    .expect("Cannot send subscription request through DeviceCommand channel");
+                            },
+                            Unsubscribe{path} => {
+                                if let None = subscriptions.remove(&path) {
+                                    warn!("No subscription found for path `{}`", &path);
+                                }
+                                let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
+                                device_cmd_sender
+                                    .send(SendMessage { message: request })
+                                    .await
+                                    .expect("Cannot send subscription request through DeviceCommand channel");
+                            },
+                        }
+                    },
+                    Err(err) => {
+                        panic!("Couldn't get RpcCommand from the channel: {err}");
+                    },
+                },
+                conn_event_result = conn_event_receiver.recv().fuse() => match conn_event_result {
+                    Ok(conn_event) => {
+                        use ConnectionEvent::*;
+                        match conn_event {
+                            RpcFrameReceived(frame) => {
+                                Self::process_rpc_frame(&mut self.mounts, &mut self.state, &device_cmd_sender, &mut pending_rpc_calls, &mut subscriptions, frame)
+                                    .await
+                                    .expect("Cannot process RPC frame");
+                            },
+                            Connected(sender) => {
+                                conn_cmd_sender = Some(sender);
+                                if !device_event_sender.is_closed() {
+                                    if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Connected) {
+                                        error!("Device event `Connected` broadcast error: {err}");
+                                    }
+                                }
+                            },
+                            Disconnected => {
+                                conn_cmd_sender = None;
+                                subscriptions.clear();
+                                pending_rpc_calls.clear();
+                                if !device_event_sender.is_closed() {
+                                    if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Disconnected) {
+                                        error!("Device event `Disconnected` broadcast error: {err}");
+                                    }
+                                }
+                            },
+                        }
+                    }
+                    Err(_) => {
+                        warn!("Connection task terminated, exiting");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn connection_task(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>) -> shv::Result<()> {
+    async {
         if let Some(time_str) = &config.reconnect_interval {
             match parse(time_str) {
                 Ok(interval) => {
                     info!("Reconnect interval set to: {:?}", interval);
                     loop {
-                        match self.try_main(config).await {
+                        match connection_loop(&config, &conn_event_sender).await {
                             Ok(_) => {
                                 info!("Finished without error");
                                 return Ok(());
@@ -150,6 +341,7 @@ impl<S> ShvDevice<S> {
                                 async_std::task::sleep(interval).await;
                             }
                         }
+                        conn_event_sender.send(ConnectionEvent::Disconnected).await?;
                     }
                 }
                 Err(err) => {
@@ -157,183 +349,85 @@ impl<S> ShvDevice<S> {
                 }
             }
         } else {
-            self.try_main(config).await
+            connection_loop(&config, &conn_event_sender).await
         }
-    }
+    }.await
+    // NOTE: The connection_task termination is detected in the device_task
+    // by conn_event_sender drop that occurs here.
+}
 
-    async fn try_main(&mut self, config: &ClientConfig) -> shv::Result<()> {
-        let url = Url::parse(&config.url)?;
-        let (scheme, host, port) = (
-            url.scheme(),
-            url.host_str().unwrap_or_default(),
-            url.port().unwrap_or(3755),
+async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<ConnectionEvent>) -> shv::Result<()> {
+    let url = Url::parse(&config.url)?;
+    let (scheme, host, port) = (
+        url.scheme(),
+        url.host_str().unwrap_or_default(),
+        url.port().unwrap_or(3755),
         );
-        if scheme != "tcp" {
-            return Err(format!("Scheme {scheme} is not supported yet.").into());
-        }
-        let address = format!("{host}:{port}");
-        // Establish a connection
-        info!("Connecting to: {address}");
-        let stream = TcpStream::connect(&address).await?;
-        let (reader, mut writer) = stream.split();
+    if scheme != "tcp" {
+        return Err(format!("Scheme {scheme} is not supported yet.").into());
+    }
+    let address = format!("{host}:{port}");
+    // Establish a connection
+    info!("Connecting to: {address}");
+    let stream = TcpStream::connect(&address).await?;
+    let (reader, mut writer) = stream.split();
 
-        let mut brd = BufReader::new(reader);
-        let mut frame_reader = shv::connection::FrameReader::new(&mut brd);
-        let mut frame_writer = shv::connection::FrameWriter::new(&mut writer);
+    let mut brd = BufReader::new(reader);
+    let mut frame_reader = shv::connection::FrameReader::new(&mut brd);
+    let mut frame_writer = shv::connection::FrameWriter::new(&mut writer);
 
-        // login
-        let (user, password) = login_from_url(&url);
-        let heartbeat_interval = config.heartbeat_interval_duration()?;
-        let login_params = LoginParams {
-            user,
-            password,
-            mount_point: (&config.mount.clone().unwrap_or_default()).to_owned(),
-            device_id: (&config.device_id.clone().unwrap_or_default()).to_owned(),
-            heartbeat_interval,
-            ..Default::default()
-        };
+    // login
+    let (user, password) = login_from_url(&url);
+    let heartbeat_interval = config.heartbeat_interval_duration()?;
+    let login_params = LoginParams {
+        user,
+        password,
+        mount_point: (&config.mount.clone().unwrap_or_default()).to_owned(),
+        device_id: (&config.device_id.clone().unwrap_or_default()).to_owned(),
+        heartbeat_interval,
+        ..Default::default()
+    };
 
-        info!("Connected OK");
-        info!("Heartbeat interval set to: {:?}", heartbeat_interval);
-        client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
+    info!("Connected OK");
+    info!("Heartbeat interval set to: {:?}", heartbeat_interval);
+    client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
 
-        let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
-        let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
+    let mut fut_heartbeat_timeout = Box::pin(async_std::task::sleep(heartbeat_interval)).fuse();
 
-        let (rpc_command_sender, rpc_command_receiver) =
-            async_std::channel::unbounded::<RpcCommand>();
+    let (conn_cmd_sender, conn_cmd_receiver) = async_std::channel::unbounded::<ConnectionCommand>();
+    conn_event_sender.send(ConnectionEvent::Connected(conn_cmd_sender.clone())).await?;
 
-        let event_sender = &self.event_sender;
-        if !event_sender.is_closed() {
-            if let Err(err) =
-                event_sender.try_broadcast(DeviceEvent::Connected(rpc_command_sender.clone()))
-            {
-                error!("Device event send error: {err}");
-            }
-        }
-
-        let mut fut_heartbeat_timeout =
-            Box::pin(future::timeout(heartbeat_interval, future::pending::<()>())).fuse();
-
-        loop {
-            let fut_receive_frame = frame_reader.receive_frame();
-            select! {
-                heartbeat_timeout = fut_heartbeat_timeout => if let Err(_) = heartbeat_timeout {
-                    // send heartbeat
-                    let message = RpcMessage::new_request(".app", METH_PING, None);
-                    rpc_command_sender.send(RpcCommand::SendMessage{ message }).await?;
+    loop {
+        let fut_receive_frame = frame_reader.receive_frame();
+        select! {
+            _ = fut_heartbeat_timeout => {
+                // send heartbeat
+                let message = RpcMessage::new_request(".app", METH_PING, None);
+                conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await?;
+            },
+            conn_cmd_result = conn_cmd_receiver.recv().fuse() => match conn_cmd_result {
+                Ok(connection_command) => {
+                    match connection_command {
+                        ConnectionCommand::SendMessage(message) => {
+                            // reset heartbeat timer
+                            fut_heartbeat_timeout = Box::pin(async_std::task::sleep(heartbeat_interval)).fuse();
+                            frame_writer.send_message(message).await?;
+                        },
+                    }
                 },
-                rpc_command_result = rpc_command_receiver.recv().fuse() => match rpc_command_result {
-                    Ok(rpc_command) => {
-                        match rpc_command {
-                            RpcCommand::SendMessage{message} => {
-                                // reset heartbeat timer
-                                fut_heartbeat_timeout = Box::pin(future::timeout(heartbeat_interval, future::pending::<()>())).fuse();
-                                frame_writer.send_message(message).await?;
-                            },
-                            RpcCommand::RpcCall{request, response_sender} => {
-                                let req_id = request.request_id().expect("request_id must be set");
-                                if pending_rpc_calls.insert(req_id, response_sender).is_some() {
-                                    panic!("request_id {req_id} for async RpcCall has been already registered");
-                                }
-                                rpc_command_sender.send(RpcCommand::SendMessage{ message: request }).await?;
-                            },
-                            RpcCommand::Subscribe{path, /* methods, */ notifications_sender} => {
-                                if subscriptions.insert(path.clone(), notifications_sender).is_some() {
-                                    warn!("Path {} has already been subscribed!", &path);
-                                }
-                                let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
-                                rpc_command_sender
-                                    .send(RpcCommand::SendMessage { message: request })
-                                    .await?;
-                            },
-                            RpcCommand::Unsubscribe{path} => {
-                                if let None = subscriptions.remove(&path) {
-                                    warn!("No subscription found for path `{}`", &path);
-                                }
-                                let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
-                                rpc_command_sender
-                                    .send(RpcCommand::SendMessage { message: request })
-                                    .await?;
-                            },
-                        }
-                    },
-                    Err(err) => {
-                        panic!("Couldn't get RpcCommand from the channel: {err}");
-                    },
+                Err(err) => {
+                    panic!("Couldn't get ConnectionCommand from the channel: {err}");
                 },
-                receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
-                    Ok(None) => {
-                        return Err("Broker socket closed".into());
-                    }
-                    Ok(Some(frame)) => {
-                        if frame.is_request() {
-                            if let Ok(mut rpcmsg) = frame.to_rpcmesage() {
-                                if let Ok(mut resp) = rpcmsg.prepare_response() {
-                                    let shv_path = frame.shv_path().unwrap_or_default();
-                                    let local_result = process_local_dir_ls(&self.mounts, &frame);
-                                    match local_result {
-                                        None => {
-                                            if let Some((mount, path)) = find_longest_prefix(&self.mounts, &shv_path) {
-                                                rpcmsg.set_shvpath(path);
-                                                let node = self.mounts.get(mount).unwrap();
-                                                node.process_request(
-                                                    RequestData { mount_path: mount.into(), request: rpcmsg },
-                                                    rpc_command_sender.clone(),
-                                                    &mut self.state).await;
-                                            } else {
-                                                let method = frame.method().unwrap_or_default();
-                                                resp.set_error(RpcError::new(RpcErrorCode::MethodNotFound, &format!("Invalid shv path {}:{}()", shv_path, method)));
-                                                rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await?;
-                                            }
-                                        }
-                                        Some(result) => {
-                                            match result {
-                                                RequestResult::Response(r) => {
-                                                    resp.set_result(r);
-                                                    rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await?;
-                                                }
-                                                RequestResult::Error(e) => {
-                                                    resp.set_error(e);
-                                                    rpc_command_sender.send(RpcCommand::SendMessage { message: resp }).await?;
-                                                }
-                                            }
-                                        }
-                                    };
-                                } else {
-                                    warn!("Invalid request frame received.");
-                                }
-                            } else {
-                                warn!("Invalid shv request");
-                            }
-                        } else if frame.is_response() {
-                            if let Some(req_id) = frame.request_id() {
-                                if let Some(response_sender) = pending_rpc_calls.remove(&req_id) {
-                                    if let Err(_) = response_sender.send(frame.clone()).await {
-                                        warn!("Response channel closed before received response: {}", &frame)
-                                    }
-                                }
-                            }
-                        } else if frame.is_signal() {
-                            if let Some(path) = frame.shv_path() {
-                                if let Some((subscribed_path, _)) = find_longest_prefix(&subscriptions, &path) {
-                                    let notifications_sender = subscriptions.get(subscribed_path).unwrap();
-                                    let subscribed_path = subscribed_path.to_owned();
-                                    if let Err(_) = notifications_sender.send(frame).await {
-                                        warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
-                                        subscriptions.remove(&subscribed_path);
-                                        let request = create_subscription_request(&subscribed_path, SubscriptionRequest::Unsubscribe);
-                                        rpc_command_sender
-                                            .send(RpcCommand::SendMessage { message: request })
-                                            .await?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Receive frame error - {e}");
-                    }
+            },
+            receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
+                Ok(None) => {
+                    return Err("Device socket closed".into());
+                }
+                Ok(Some(frame)) => {
+                    conn_event_sender.send(ConnectionEvent::RpcFrameReceived(frame)).await?;
+                }
+                Err(e) => {
+                    error!("Receive frame error - {e}");
                 }
             }
         }

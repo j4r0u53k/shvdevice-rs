@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::{HandlerFn, RequestData, RequestResult, Route, RpcCommand, Sender};
+use crate::{HandlerFn, RequestData, RequestResult, Route, DeviceCommand, Sender};
 use log::{error, warn};
 use shv::metamethod::Access;
 use shv::metamethod::{Flag, MetaMethod};
@@ -217,7 +217,7 @@ mod tests {
         );
     }
 
-    async fn dummy_handler(_: RequestData, _: Sender<RpcCommand>, _: &mut Option<()>) {}
+    async fn dummy_handler(_: RequestData, _: Sender<DeviceCommand>, _: &mut Option<()>) {}
 
     #[test]
     fn accept_valid_routes() {
@@ -340,7 +340,7 @@ impl<S> ShvNode<S> {
     pub async fn process_request(
         &self,
         req_data: RequestData,
-        rpc_command_sender: Sender<RpcCommand>,
+        rpc_command_sender: Sender<DeviceCommand>,
         device_state: &mut Option<S>,
     ) {
         let rq = &req_data.request;
@@ -353,7 +353,7 @@ impl<S> ShvNode<S> {
         }
     }
 
-    async fn process_dir_ls(&self, rq: &RpcMessage, rpc_command_sender: Sender<RpcCommand>) {
+    async fn process_dir_ls(&self, rq: &RpcMessage, rpc_command_sender: Sender<DeviceCommand>) {
         let mut resp = rq.prepare_response().unwrap_or_default(); // FIXME: better handling
         match self.dir_ls(rq) {
             RequestResult::Response(val) => {
@@ -364,7 +364,7 @@ impl<S> ShvNode<S> {
             }
         }
         if let Err(e) = rpc_command_sender
-            .send(RpcCommand::SendMessage { message: resp })
+            .send(DeviceCommand::SendMessage { message: resp })
             .await
         {
             error!("process_dir_ls: Cannot send response ({e})");
