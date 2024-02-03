@@ -11,7 +11,7 @@ use shvdevice::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvdevice::shvnode::SIG_CHNG;
-use shvdevice::{RequestData, Route, DeviceCommand, Sender, ShvDevice, BroadcastReceiver, DeviceEvent};
+use shvdevice::{RequestData, Route, DeviceCommand, Sender, ShvDevice, DeviceEventsReceiver};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -121,16 +121,9 @@ fn delay_node_routes() -> Vec<Route<State>> {
     .into()
 }
 
-async fn emit_chng_task(mut dev_evt_rx: BroadcastReceiver<DeviceEvent>) -> shv::Result<()> {
+async fn emit_chng_task(mut dev_evt_rx: DeviceEventsReceiver) -> shv::Result<()> {
     info!("signal task started");
-    let dev_cmd_tx = loop {
-        info!("signal task wait for device start");
-        if let Ok(evt) = dev_evt_rx.recv().await {
-            if let DeviceEvent::Started(dev_cmd_tx) = evt {
-                break dev_cmd_tx;
-            }
-        }
-    };
+    let dev_cmd_tx = dev_evt_rx.wait_for_init().await;
     info!("signal task got the command channel");
 
     let mut cnt = 0;
@@ -156,7 +149,7 @@ pub(crate) fn main() -> shv::Result<()> {
     let counter = State(Arc::new(Mutex::new(-10)));
 
     let mut device = ShvDevice::new();
-    let dev_evt_rx = device.event_receiver();
+    let dev_evt_rx = device.events_receiver();
 
     async_std::task::spawn(emit_chng_task(dev_evt_rx));
 
@@ -164,6 +157,6 @@ pub(crate) fn main() -> shv::Result<()> {
         .mount(".app", APP_METHODS, app_node_routes())
         .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
         .mount("status/delayed", DELAY_METHODS, delay_node_routes())
-        .register_state(counter)
+        .with_state(counter)
         .run(&client_config)
 }

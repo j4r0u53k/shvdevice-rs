@@ -2,6 +2,7 @@ pub mod appnodes;
 pub mod shvnode;
 
 use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, METH_PING};
+use async_broadcast::RecvError;
 use async_std::io::BufReader;
 use async_std::net::TcpStream;
 use duration_str::parse;
@@ -16,6 +17,7 @@ use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::util::login_from_url;
 use shv::{client, make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
 use std::collections::{BTreeMap, HashMap};
+use std::pin::Pin;
 use url::Url;
 
 pub type Sender<K> = async_std::channel::Sender<K>;
@@ -67,14 +69,14 @@ pub struct Route<S> {
 #[macro_export]
 macro_rules! handler {
     ($func:ident) => {
-        Box::new(move |r, s, d| Box::pin($func(r, s, d)))
+        Box::new(move |r, s, t| Box::pin($func(r, s, t)))
     };
 }
 
 #[macro_export]
 macro_rules! handler_stateless {
     ($func:ident) => {
-        Box::new(move |r, s, _d| Box::pin($func(r, s)))
+        Box::new(move |r, s, _t| Box::pin($func(r, s)))
     };
 }
 
@@ -93,7 +95,6 @@ impl<S> Route<S> {
 
 #[derive(Clone)]
 pub enum DeviceEvent {
-    Started(Sender<DeviceCommand>),
     /// Device core sends this event when connected to a broker
     Connected,
     Disconnected,
@@ -109,20 +110,63 @@ enum ConnectionCommand {
     SendMessage(RpcMessage),
 }
 
+pub struct DeviceEventsReceiver {
+    /// Cached value of the sender
+    cmd_sender: Option<Sender<DeviceCommand>>,
+    init_rx: BroadcastReceiver<Sender<DeviceCommand>>,
+    event_rx: BroadcastReceiver<DeviceEvent>,
+}
+
+impl DeviceEventsReceiver {
+    pub async fn wait_for_event(&mut self) -> Result<DeviceEvent, RecvError> {
+        loop {
+            match self.event_rx.recv().await {
+                Ok(evt) => break Ok(evt),
+                Err(async_broadcast::RecvError::Overflowed(cnt)) => {
+                    warn!("Device event receiver missed {cnt} event(s)!");
+                },
+                err => break err,
+            }
+        }
+    }
+
+    pub fn recv_event(&mut self) -> Pin<Box<async_broadcast::Recv<'_, DeviceEvent>>> {
+        self.event_rx.recv()
+    }
+
+    pub async fn wait_for_init(&mut self) -> Sender<DeviceCommand> {
+        if let Some(snd) = &self.cmd_sender {
+            return snd.clone();
+        }
+        match self.init_rx.recv().await {
+            Ok(sender) => {
+                self.cmd_sender = Some(sender.clone());
+                sender
+            },
+            _ => panic!("Device init missed"),
+        }
+    }
+}
+
 pub struct ShvDevice<S> {
     mounts: BTreeMap<String, ShvNode<S>>,
     state: Option<S>,
-    device_event_channel: (BroadcastSender<DeviceEvent>, BroadcastReceiver<DeviceEvent>),
+    /// Storing both parts, so there is always at least one receiver and the channel doesn't get closed
+    init_channel: (BroadcastSender<Sender<DeviceCommand>>, BroadcastReceiver<Sender<DeviceCommand>>),
+    events_channel: (BroadcastSender<DeviceEvent>, BroadcastReceiver<DeviceEvent>),
 }
 
 impl<S> ShvDevice<S> {
     pub fn new() -> Self {
-        let mut device_event_channel = async_broadcast::broadcast(10);
-        device_event_channel.0.set_overflow(true);
+        let mut init_channel = async_broadcast::broadcast(1);
+        init_channel.0.set_overflow(true);
+        let mut events_channel = async_broadcast::broadcast(10);
+        events_channel.0.set_overflow(true);
         Self {
             mounts: Default::default(),
             state: Default::default(),
-            device_event_channel,
+            init_channel,
+            events_channel,
         }
     }
 
@@ -138,13 +182,17 @@ impl<S> ShvDevice<S> {
         self
     }
 
-    pub fn register_state(&mut self, state: S) -> &mut Self {
+    pub fn with_state(&mut self, state: S) -> &mut Self {
         self.state = Some(state);
         self
     }
 
-    pub fn event_receiver(&self) -> BroadcastReceiver<DeviceEvent> {
-        self.device_event_channel.1.new_receiver()
+    pub fn events_receiver(&self) -> DeviceEventsReceiver {
+        DeviceEventsReceiver {
+            cmd_sender: None,
+            init_rx: self.init_channel.0.new_receiver(),
+            event_rx: self.events_channel.0.new_receiver(),
+        }
     }
 
     pub fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
@@ -234,14 +282,12 @@ impl<S> ShvDevice<S> {
 
         let (device_cmd_sender, device_cmd_receiver) =
             async_std::channel::unbounded::<DeviceCommand>();
-        let device_event_sender = self.device_event_channel.0.clone();
+        let device_event_sender = self.events_channel.0.clone();
+        let init_tx = &self.init_channel.0;
         let mut conn_cmd_sender: Option<Sender<ConnectionCommand>> = None;
 
-        if !device_event_sender.is_closed() {
-            info!("device event start broadcast");
-            if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Started(device_cmd_sender.clone())) {
-                error!("Device event `Started` broadcast error: {err}");
-            }
+        if let Err(err) = init_tx.try_broadcast(device_cmd_sender.clone()) {
+            error!("Device init broadcast error: {err}");
         }
 
         loop {
@@ -301,20 +347,16 @@ impl<S> ShvDevice<S> {
                             },
                             Connected(sender) => {
                                 conn_cmd_sender = Some(sender);
-                                if !device_event_sender.is_closed() {
-                                    if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Connected) {
-                                        error!("Device event `Connected` broadcast error: {err}");
-                                    }
+                                if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Connected) {
+                                    error!("Device event `Connected` broadcast error: {err}");
                                 }
                             },
                             Disconnected => {
                                 conn_cmd_sender = None;
                                 subscriptions.clear();
                                 pending_rpc_calls.clear();
-                                if !device_event_sender.is_closed() {
-                                    if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Disconnected) {
-                                        error!("Device event `Disconnected` broadcast error: {err}");
-                                    }
+                                if let Err(err) = device_event_sender.try_broadcast(DeviceEvent::Disconnected) {
+                                    error!("Device event `Disconnected` broadcast error: {err}");
                                 }
                             },
                         }
