@@ -57,10 +57,9 @@ const APP_NODE: AppNode = AppNode {
     shv_version_minor: 0,
 };
 
-async fn app_node_process_request<S>(
+async fn app_node_process_request(
     req_data: RequestData,
     rpc_command_sender: Sender<DeviceCommand>,
-    _device_state: &mut Option<S>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
@@ -92,7 +91,7 @@ pub fn app_node_routes<S>() -> Vec<Route<S>> {
             METH_NAME,
             METH_PING,
         ],
-        crate::handler!(app_node_process_request),
+        crate::handler_stateless!(app_node_process_request),
     )]
     .into()
 }
@@ -136,10 +135,9 @@ const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
     serial_number: None,
 };
 
-async fn app_device_node_process_request<S>(
+async fn app_device_node_process_request(
     req_data: RequestData,
     rpc_command_sender: Sender<DeviceCommand>,
-    _device_state: &mut Option<S>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
@@ -168,7 +166,7 @@ async fn app_device_node_process_request<S>(
 pub fn app_device_node_routes<S>() -> Vec<Route<S>> {
     [Route::new(
         [METH_NAME, METH_VERSION, METH_SERIAL_NUMBER],
-        crate::handler!(app_device_node_process_request),
+        crate::handler_stateless!(app_device_node_process_request),
     )]
     .into()
 }

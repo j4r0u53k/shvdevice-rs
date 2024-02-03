@@ -2,11 +2,10 @@ pub mod appnodes;
 pub mod shvnode;
 
 use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, METH_PING};
-use async_std::future;
 use async_std::io::BufReader;
 use async_std::net::TcpStream;
 use duration_str::parse;
-use futures::future::{LocalBoxFuture, select};
+use futures::future::{LocalBoxFuture};
 use futures::{select, AsyncReadExt, FutureExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
@@ -69,6 +68,13 @@ pub struct Route<S> {
 macro_rules! handler {
     ($func:ident) => {
         Box::new(move |r, s, d| Box::pin($func(r, s, d)))
+    };
+}
+
+#[macro_export]
+macro_rules! handler_stateless {
+    ($func:ident) => {
+        Box::new(move |r, s, _d| Box::pin($func(r, s)))
     };
 }
 
