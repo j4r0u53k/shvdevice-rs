@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_std::sync::Mutex;
+use async_std::sync::{RwLock};
 use clap::Parser;
 use log::*;
 use shv::metamethod::{Flag, MetaMethod};
@@ -82,7 +82,8 @@ const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
     description: "",
 }];
 
-struct State(Arc<Mutex<i32>>);
+#[derive(Clone)]
+struct State(Arc<RwLock<i32>>);
 
 async fn delay_node_process_request(
     req_data: RequestData,
@@ -93,7 +94,7 @@ async fn delay_node_process_request(
     if rq.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(rq.method(), Some(METH_GET_DELAYED));
         let mut counter = state.as_mut().expect("Missing state for delay node")
-            .0.lock_arc().await;
+            .0.write_arc().await;
         let mut resp = rq.prepare_response().unwrap_or_default();
         async_std::task::spawn(async move {
             let ret_val = {
@@ -121,10 +122,8 @@ fn delay_node_routes() -> Vec<Route<State>> {
     .into()
 }
 
-async fn emit_chng_task(mut dev_evt_rx: DeviceEventsReceiver) -> shv::Result<()> {
+async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, _dev_evt_rx: DeviceEventsReceiver, app_data: State) -> shv::Result<()> {
     info!("signal task started");
-    let dev_cmd_tx = dev_evt_rx.wait_for_init().await;
-    info!("signal task got the command channel");
 
     let mut cnt = 0;
     loop {
@@ -133,6 +132,8 @@ async fn emit_chng_task(mut dev_evt_rx: DeviceEventsReceiver) -> shv::Result<()>
         cnt += 1;
         dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
         info!("signal task emits a value: {cnt}");
+        let state = app_data.0.read().await;
+        info!("state: {state}");
     }
 }
 
@@ -146,17 +147,18 @@ pub(crate) fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = State(Arc::new(Mutex::new(-10)));
+    let counter = State(Arc::new(RwLock::new(-10)));
+    let cnt = counter.clone();
 
-    let mut device = ShvDevice::new();
-    let dev_evt_rx = device.events_receiver();
+    let app_tasks = move |dev_cmd_tx, dev_evt_rx| {
+        async_std::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter.clone()));
+    };
 
-    async_std::task::spawn(emit_chng_task(dev_evt_rx));
-
-    device
+    ShvDevice::new()
         .mount(".app", APP_METHODS, app_node_routes())
         .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
         .mount("status/delayed", DELAY_METHODS, delay_node_routes())
-        .with_state(counter)
+        .with_state(cnt)
+        .on_init(app_tasks)
         .run(&client_config)
 }
