@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_std::sync::{RwLock};
+// use async_std::sync::{RwLock};
+use tokio::sync::RwLock;
+
 use clap::Parser;
 use futures::{select, FutureExt};
 use log::*;
@@ -95,15 +97,15 @@ async fn delay_node_process_request(
     if rq.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(rq.method(), Some(METH_GET_DELAYED));
         let mut counter = state.as_mut().expect("Missing state for delay node")
-            .0.write_arc().await;
+            .0.clone().write_owned().await;
         let mut resp = rq.prepare_response().unwrap_or_default();
-        async_std::task::spawn(async move {
+        tokio::task::spawn(async move {
             let ret_val = {
                 *counter += 1;
                 *counter
             };
             drop(counter);
-            async_std::task::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
             resp.set_result(ret_val.into());
             if let Err(e) = rpc_command_sender
                 .send(DeviceCommand::SendMessage { message: resp })
@@ -141,7 +143,7 @@ async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, mut dev_evt_rx: Devic
                 },
                 Err(err) => error!("Device event error: {err}"),
             },
-            _ = async_std::task::sleep(Duration::from_secs(3)).fuse() => { }
+            _ = tokio::time::sleep(Duration::from_secs(3)).fuse() => { }
 
         }
         if emit_signal {
@@ -155,7 +157,8 @@ async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, mut dev_evt_rx: Devic
     }
 }
 
-pub(crate) fn main() -> shv::Result<()> {
+#[tokio::main]
+pub(crate) async fn main() -> shv::Result<()> {
     let cli_opts = Opts::parse();
     init_logger(&cli_opts);
 
@@ -169,7 +172,7 @@ pub(crate) fn main() -> shv::Result<()> {
     let cnt = counter.clone();
 
     let app_tasks = move |dev_cmd_tx, dev_evt_rx| {
-        async_std::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter));
+        tokio::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter));
     };
 
     ShvDevice::new()
@@ -179,4 +182,5 @@ pub(crate) fn main() -> shv::Result<()> {
         .with_state(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)
+        .await
 }

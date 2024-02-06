@@ -3,11 +3,16 @@ pub mod shvnode;
 
 use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, METH_PING};
 use async_broadcast::RecvError;
-use async_std::io::BufReader;
-use async_std::net::TcpStream;
+
+// use async_std::io::BufReader;
+// use async_std::net::TcpStream;
+use tokio::io::BufReader;
+use tokio::net::TcpStream;
+use tokio_util::compat::{TokioAsyncReadCompatExt,TokioAsyncWriteCompatExt};
+
 use duration_str::parse;
 use futures::future::LocalBoxFuture;
-use futures::{select, AsyncReadExt, FutureExt};
+use futures::{select, FutureExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
 use shv::client::{ClientConfig, LoginParams};
@@ -22,8 +27,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use url::Url;
 
-pub type Sender<K> = async_std::channel::Sender<K>;
-pub type Receiver<K> = async_std::channel::Receiver<K>;
+// pub type Sender<K> = async_std::channel::Sender<K>;
+// pub type Receiver<K> = async_std::channel::Receiver<K>;
+pub type Sender<K> = tokio::sync::mpsc::Sender<K>;
+pub type Receiver<K> = tokio::sync::mpsc::Receiver<K>;
 
 pub type BroadcastSender<K> = async_broadcast::Sender<K>;
 pub type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
@@ -163,24 +170,28 @@ impl<S> ShvDevice<S> {
         self
     }
 
-    fn run_with_init_opt<H>(&mut self, config: &ClientConfig, handler: Option<H>) -> shv::Result<()>
+    async fn run_with_init_opt<H>(&mut self, config: &ClientConfig, handler: Option<H>) -> shv::Result<()>
     where
         H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
     {
-        let (conn_evt_tx, conn_evt_rx) = async_std::channel::unbounded::<ConnectionEvent>();
-        async_std::task::spawn(connection_task(config.clone(), conn_evt_tx));
-        async_std::task::block_on(self.device_loop(conn_evt_rx, handler))
+        // let (conn_evt_tx, conn_evt_rx) = async_std::channel::unbounded::<ConnectionEvent>();
+        // async_std::task::spawn(connection_task(config.clone(), conn_evt_tx));
+        // async_std::task::block_on(self.device_loop(conn_evt_rx, handler))
+
+        let (conn_evt_tx, conn_evt_rx) = tokio::sync::mpsc::channel::<ConnectionEvent>(32);
+        tokio::spawn(connection_task(config.clone(), conn_evt_tx));
+        self.device_loop(conn_evt_rx, handler).await
     }
 
-    pub fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
-        self.run_with_init_opt(config, Option::<fn(Sender<DeviceCommand>, DeviceEventsReceiver)>::None)
+    pub async fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
+        self.run_with_init_opt(config, Option::<fn(Sender<DeviceCommand>, DeviceEventsReceiver)>::None).await
     }
 
-    pub fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shv::Result<()>
+    pub async fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shv::Result<()>
     where
         H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
     {
-        self.run_with_init_opt(config, Some(handler))
+        self.run_with_init_opt(config, Some(handler)).await
     }
 
     async fn process_rpc_frame(
@@ -257,15 +268,15 @@ impl<S> ShvDevice<S> {
         Ok(())
     }
 
-    async fn device_loop<H>(&mut self, conn_event_receiver: Receiver<ConnectionEvent>, init_handler: Option<H>) -> shv::Result<()>
+    async fn device_loop<H>(&mut self, mut conn_event_receiver: Receiver<ConnectionEvent>, init_handler: Option<H>) -> shv::Result<()>
     where
         H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
 
-        let (device_cmd_sender, device_cmd_receiver) =
-            async_std::channel::unbounded::<DeviceCommand>();
+        let (device_cmd_sender, mut device_cmd_receiver) =
+            tokio::sync::mpsc::channel::<DeviceCommand>(32);
         let (mut device_events_tx, device_events_rx) = async_broadcast::broadcast(10);
         device_events_tx.set_overflow(true);
         let dev_events_receiver = DeviceEventsReceiver(device_events_rx.clone());
@@ -278,7 +289,7 @@ impl<S> ShvDevice<S> {
         loop {
             select! {
                 device_cmd_result = device_cmd_receiver.recv().fuse() => match device_cmd_result {
-                    Ok(device_cmd) => {
+                    Some(device_cmd) => {
                         use DeviceCommand::*;
                         match device_cmd {
                             SendMessage{message} => {
@@ -317,12 +328,12 @@ impl<S> ShvDevice<S> {
                             },
                         }
                     },
-                    Err(err) => {
-                        panic!("Couldn't get RpcCommand from the channel: {err}");
+                    None => {
+                        panic!("Couldn't get DeviceCommand from the channel");
                     },
                 },
                 conn_event_result = conn_event_receiver.recv().fuse() => match conn_event_result {
-                    Ok(conn_event) => {
+                    Some(conn_event) => {
                         use ConnectionEvent::*;
                         match conn_event {
                             RpcFrameReceived(frame) => {
@@ -346,7 +357,7 @@ impl<S> ShvDevice<S> {
                             },
                         }
                     }
-                    Err(_) => {
+                    None => {
                         warn!("Connection task terminated, exiting");
                         return Ok(());
                     }
@@ -370,7 +381,7 @@ async fn connection_task(config: ClientConfig, conn_event_sender: Sender<Connect
                             Err(err) => {
                                 error!("Error in connection loop: {err}");
                                 info!("Reconnecting after: {:?}", interval);
-                                async_std::task::sleep(interval).await;
+                                tokio::time::sleep(interval).await;
                             }
                         }
                     }
@@ -406,10 +417,11 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
     let address = format!("{host}:{port}");
     // Establish a connection
     info!("Connecting to: {address}");
-    let stream = TcpStream::connect(&address).await?;
-    let (reader, mut writer) = stream.split();
+    let mut stream = TcpStream::connect(&address).await?;
+    let (reader, writer) = stream.split();
 
-    let mut brd = BufReader::new(reader);
+    let mut writer = writer.compat_write();
+    let mut brd = BufReader::new(reader).compat();
     let mut frame_reader = shv::streamrw::StreamFrameReader::new(&mut brd);
     let mut frame_writer = shv::streamrw::StreamFrameWriter::new(&mut writer);
 
@@ -429,9 +441,9 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
     info!("Heartbeat interval set to: {:?}", heartbeat_interval);
     client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
 
-    let mut fut_heartbeat_timeout = Box::pin(async_std::task::sleep(heartbeat_interval)).fuse();
+    let mut fut_heartbeat_timeout = Box::pin(tokio::time::sleep(heartbeat_interval)).fuse();
 
-    let (conn_cmd_sender, conn_cmd_receiver) = async_std::channel::unbounded::<ConnectionCommand>();
+    let (conn_cmd_sender, mut conn_cmd_receiver) = tokio::sync::mpsc::channel::<ConnectionCommand>(32);
     conn_event_sender.send(ConnectionEvent::Connected(conn_cmd_sender.clone())).await?;
 
     let res: shv::Result<()> = async move {
@@ -444,18 +456,18 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
                     conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await?;
                 },
                 conn_cmd_result = conn_cmd_receiver.recv().fuse() => match conn_cmd_result {
-                    Ok(connection_command) => {
+                    Some(connection_command) => {
                         match connection_command {
                             ConnectionCommand::SendMessage(message) => {
                                 // reset heartbeat timer
-                                fut_heartbeat_timeout = Box::pin(async_std::task::sleep(heartbeat_interval)).fuse();
+                                fut_heartbeat_timeout = Box::pin(tokio::time::sleep(heartbeat_interval)).fuse();
                                 frame_writer.send_message(message).await?;
                             },
                         }
                     },
-                    Err(err) => {
+                    None => {
                         // return Err(format!("Couldn't get ConnectionCommand from the channel: {err}").into());
-                        error!("Couldn't get ConnectionCommand from the channel: {err}");
+                        error!("Couldn't get ConnectionCommand from the channel");
                     },
                 },
                 receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
