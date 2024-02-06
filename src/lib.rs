@@ -13,6 +13,8 @@ use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
 use shv::client::{ClientConfig, LoginParams};
 use shv::metamethod::MetaMethod;
 use shv::rpcframe::RpcFrame;
+use shv::framerw::FrameWriter;
+use shv::framerw::FrameReader;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::util::login_from_url;
 use shv::{client, make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
@@ -408,8 +410,8 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
     let (reader, mut writer) = stream.split();
 
     let mut brd = BufReader::new(reader);
-    let mut frame_reader = shv::connection::FrameReader::new(&mut brd);
-    let mut frame_writer = shv::connection::FrameWriter::new(&mut writer);
+    let mut frame_reader = shv::streamrw::StreamFrameReader::new(&mut brd);
+    let mut frame_writer = shv::streamrw::StreamFrameWriter::new(&mut writer);
 
     // login
     let (user, password) = login_from_url(&url);
@@ -457,14 +459,11 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
                     },
                 },
                 receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
-                    Ok(None) => {
-                        return Err("Device socket closed".into());
-                    }
-                    Ok(Some(frame)) => {
+                    Ok(frame) => {
                         conn_event_sender.send(ConnectionEvent::RpcFrameReceived(frame)).await?;
                     }
                     Err(e) => {
-                        error!("Receive frame error - {e}");
+                        return Err(format!("Receive frame error - {e}").into());
                     }
                 }
             }
