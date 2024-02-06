@@ -6,7 +6,7 @@ use async_broadcast::RecvError;
 use async_std::io::BufReader;
 use async_std::net::TcpStream;
 use duration_str::parse;
-use futures::future::{LocalBoxFuture};
+use futures::future::LocalBoxFuture;
 use futures::{select, AsyncReadExt, FutureExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
@@ -134,7 +134,6 @@ impl DeviceEventsReceiver {
 pub struct ShvDevice<S> {
     mounts: BTreeMap<String, ShvNode<S>>,
     state: Option<S>,
-    init_handler: Option<Box<dyn Fn(Sender<DeviceCommand>, DeviceEventsReceiver)>>,
 }
 
 impl<S> ShvDevice<S> {
@@ -142,7 +141,6 @@ impl<S> ShvDevice<S> {
         Self {
             mounts: Default::default(),
             state: Default::default(),
-            init_handler: None,
         }
     }
 
@@ -163,15 +161,24 @@ impl<S> ShvDevice<S> {
         self
     }
 
-    pub fn on_init(&mut self, init_handler: impl Fn(Sender<DeviceCommand>, DeviceEventsReceiver) + 'static) -> &mut Self {
-        self.init_handler = Some(Box::new(init_handler));
-        self
+    fn run_with_init_opt<H>(&mut self, config: &ClientConfig, handler: Option<H>) -> shv::Result<()>
+    where
+        H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
+    {
+        let (conn_evt_tx, conn_evt_rx) = async_std::channel::unbounded::<ConnectionEvent>();
+        async_std::task::spawn(connection_task(config.clone(), conn_evt_tx));
+        async_std::task::block_on(self.device_loop(conn_evt_rx, handler))
     }
 
     pub fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
-        let (conn_evt_tx, conn_evt_rx) = async_std::channel::unbounded::<ConnectionEvent>();
-        async_std::task::spawn(connection_task(config.clone(), conn_evt_tx));
-        async_std::task::block_on(self.device_loop(conn_evt_rx))
+        self.run_with_init_opt(config, Option::<fn(Sender<DeviceCommand>, DeviceEventsReceiver)>::None)
+    }
+
+    pub fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shv::Result<()>
+    where
+        H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
+    {
+        self.run_with_init_opt(config, Some(handler))
     }
 
     async fn process_rpc_frame(
@@ -248,7 +255,10 @@ impl<S> ShvDevice<S> {
         Ok(())
     }
 
-    async fn device_loop(&mut self, conn_event_receiver: Receiver<ConnectionEvent>) -> shv::Result<()> {
+    async fn device_loop<H>(&mut self, conn_event_receiver: Receiver<ConnectionEvent>, init_handler: Option<H>) -> shv::Result<()>
+    where
+        H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
+    {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
 
@@ -259,7 +269,7 @@ impl<S> ShvDevice<S> {
         let dev_events_receiver = DeviceEventsReceiver(device_events_rx.clone());
         let mut conn_cmd_sender: Option<Sender<ConnectionCommand>> = None;
 
-        if let Some(init_handler) = self.init_handler.take() {
+        if let Some(init_handler) = init_handler {
             init_handler(device_cmd_sender.clone(), dev_events_receiver);
         }
 

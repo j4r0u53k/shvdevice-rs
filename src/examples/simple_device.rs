@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_std::sync::{RwLock};
 use clap::Parser;
+use futures::{select, FutureExt};
 use log::*;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcMessage};
@@ -11,7 +12,7 @@ use shvdevice::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvdevice::shvnode::SIG_CHNG;
-use shvdevice::{RequestData, Route, DeviceCommand, Sender, ShvDevice, DeviceEventsReceiver};
+use shvdevice::{RequestData, Route, DeviceCommand, Sender, ShvDevice, DeviceEventsReceiver, DeviceEvent};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -122,16 +123,33 @@ fn delay_node_routes() -> Vec<Route<State>> {
     .into()
 }
 
-async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, _dev_evt_rx: DeviceEventsReceiver, app_data: State) -> shv::Result<()> {
+async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, mut dev_evt_rx: DeviceEventsReceiver, app_data: State) -> shv::Result<()> {
     info!("signal task started");
 
     let mut cnt = 0;
+    let mut emit_signal = true;
     loop {
-        async_std::task::sleep(Duration::from_secs(3)).await;
-        let sig = RpcMessage::new_signal("status/delayed", SIG_CHNG, Some(cnt.into()));
-        cnt += 1;
-        dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
-        info!("signal task emits a value: {cnt}");
+        select! {
+            rx_event = dev_evt_rx.recv_event().fuse() => match rx_event {
+                Ok(DeviceEvent::Connected) => {
+                    emit_signal = true;
+                    warn!("Device connected");
+                },
+                Ok(DeviceEvent::Disconnected) => {
+                    emit_signal = false;
+                    warn!("Device disconnected");
+                },
+                Err(err) => error!("Device event error: {err}"),
+            },
+            _ = async_std::task::sleep(Duration::from_secs(3)).fuse() => { }
+
+        }
+        if emit_signal {
+            let sig = RpcMessage::new_signal("status/delayed", SIG_CHNG, Some(cnt.into()));
+            dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
+            info!("signal task emits a value: {cnt}");
+            cnt += 1;
+        }
         let state = app_data.0.read().await;
         info!("state: {state}");
     }
@@ -151,7 +169,7 @@ pub(crate) fn main() -> shv::Result<()> {
     let cnt = counter.clone();
 
     let app_tasks = move |dev_cmd_tx, dev_evt_rx| {
-        async_std::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter.clone()));
+        async_std::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter));
     };
 
     ShvDevice::new()
@@ -159,6 +177,6 @@ pub(crate) fn main() -> shv::Result<()> {
         .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
         .mount("status/delayed", DELAY_METHODS, delay_node_routes())
         .with_state(cnt)
-        .on_init(app_tasks)
-        .run(&client_config)
+        .run_with_init(&client_config, app_tasks)
+        // .run(&client_config)
 }
