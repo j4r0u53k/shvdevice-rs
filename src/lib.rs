@@ -289,7 +289,7 @@ impl<S> ShvDevice<S> {
                             RpcCall{request, response_sender} => {
                                 let req_id = request.request_id().expect("request_id in the request of a RpcCall must be set");
                                 if pending_rpc_calls.insert(req_id, response_sender).is_some() {
-                                    panic!("request_id {req_id} for async RpcCall has been already registered");
+                                    error!("request_id {req_id} for async RpcCall has already been registered");
                                 }
                                 device_cmd_sender.send(SendMessage{ message: request }).await?;
                             },
@@ -355,7 +355,7 @@ impl<S> ShvDevice<S> {
 }
 
 async fn connection_task(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>) -> shv::Result<()> {
-    async {
+    let res = async {
         if let Some(time_str) = &config.reconnect_interval {
             match parse(time_str) {
                 Ok(interval) => {
@@ -363,16 +363,14 @@ async fn connection_task(config: ClientConfig, conn_event_sender: Sender<Connect
                     loop {
                         match connection_loop(&config, &conn_event_sender).await {
                             Ok(_) => {
-                                info!("Finished without error");
                                 return Ok(());
                             }
                             Err(err) => {
-                                error!("Error in main loop: {err}");
+                                error!("Error in connection loop: {err}");
                                 info!("Reconnecting after: {:?}", interval);
                                 async_std::task::sleep(interval).await;
                             }
                         }
-                        conn_event_sender.send(ConnectionEvent::Disconnected).await?;
                     }
                 }
                 Err(err) => {
@@ -382,7 +380,13 @@ async fn connection_task(config: ClientConfig, conn_event_sender: Sender<Connect
         } else {
             connection_loop(&config, &conn_event_sender).await
         }
-    }.await
+    }.await;
+
+    match &res {
+        Ok(_) => info!("Connection task finished OK"),
+        Err(e) => error!("Connection task finished with error: {e}"),
+    }
+    res
     // NOTE: The connection_task termination is detected in the device_task
     // by conn_event_sender drop that occurs here.
 }
@@ -395,7 +399,7 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
         url.port().unwrap_or(3755),
         );
     if scheme != "tcp" {
-        return Err(format!("Scheme {scheme} is not supported yet.").into());
+        panic!("Scheme {scheme} is not supported yet.");
     }
     let address = format!("{host}:{port}");
     // Establish a connection
@@ -428,41 +432,46 @@ async fn connection_loop(config: &ClientConfig, conn_event_sender: &Sender<Conne
     let (conn_cmd_sender, conn_cmd_receiver) = async_std::channel::unbounded::<ConnectionCommand>();
     conn_event_sender.send(ConnectionEvent::Connected(conn_cmd_sender.clone())).await?;
 
-    loop {
-        let fut_receive_frame = frame_reader.receive_frame();
-        select! {
-            _ = fut_heartbeat_timeout => {
-                // send heartbeat
-                let message = RpcMessage::new_request(".app", METH_PING, None);
-                conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await?;
-            },
-            conn_cmd_result = conn_cmd_receiver.recv().fuse() => match conn_cmd_result {
-                Ok(connection_command) => {
-                    match connection_command {
-                        ConnectionCommand::SendMessage(message) => {
-                            // reset heartbeat timer
-                            fut_heartbeat_timeout = Box::pin(async_std::task::sleep(heartbeat_interval)).fuse();
-                            frame_writer.send_message(message).await?;
-                        },
+    let res: shv::Result<()> = async move {
+        loop {
+            let fut_receive_frame = frame_reader.receive_frame();
+            select! {
+                _ = fut_heartbeat_timeout => {
+                    // send heartbeat
+                    let message = RpcMessage::new_request(".app", METH_PING, None);
+                    conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await?;
+                },
+                conn_cmd_result = conn_cmd_receiver.recv().fuse() => match conn_cmd_result {
+                    Ok(connection_command) => {
+                        match connection_command {
+                            ConnectionCommand::SendMessage(message) => {
+                                // reset heartbeat timer
+                                fut_heartbeat_timeout = Box::pin(async_std::task::sleep(heartbeat_interval)).fuse();
+                                frame_writer.send_message(message).await?;
+                            },
+                        }
+                    },
+                    Err(err) => {
+                        // return Err(format!("Couldn't get ConnectionCommand from the channel: {err}").into());
+                        error!("Couldn't get ConnectionCommand from the channel: {err}");
+                    },
+                },
+                receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
+                    Ok(None) => {
+                        return Err("Device socket closed".into());
                     }
-                },
-                Err(err) => {
-                    panic!("Couldn't get ConnectionCommand from the channel: {err}");
-                },
-            },
-            receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
-                Ok(None) => {
-                    return Err("Device socket closed".into());
-                }
-                Ok(Some(frame)) => {
-                    conn_event_sender.send(ConnectionEvent::RpcFrameReceived(frame)).await?;
-                }
-                Err(e) => {
-                    error!("Receive frame error - {e}");
+                    Ok(Some(frame)) => {
+                        conn_event_sender.send(ConnectionEvent::RpcFrameReceived(frame)).await?;
+                    }
+                    Err(e) => {
+                        error!("Receive frame error - {e}");
+                    }
                 }
             }
         }
-    }
+    }.await;
+    conn_event_sender.send(ConnectionEvent::Disconnected).await?;
+    res
 }
 
 enum SubscriptionRequest {
