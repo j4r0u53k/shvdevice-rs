@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-// use async_std::sync::{RwLock};
 use tokio::sync::RwLock;
 
 use clap::Parser;
@@ -14,7 +13,7 @@ use shvdevice::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvdevice::shvnode::SIG_CHNG;
-use shvdevice::{RequestData, Route, DeviceCommand, Sender, ShvDevice, DeviceEventsReceiver, DeviceEvent};
+use shvdevice::{RequestData, Route, DeviceCommand, Sender, DeviceEventsReceiver, DeviceEvent};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -108,8 +107,9 @@ async fn delay_node_process_request(
             tokio::time::sleep(Duration::from_secs(3)).await;
             resp.set_result(ret_val.into());
             if let Err(e) = rpc_command_sender
-                .send(DeviceCommand::SendMessage { message: resp })
-                .await
+                // .send(DeviceCommand::SendMessage { message: resp })
+                // .await
+                .unbounded_send(DeviceCommand::SendMessage { message: resp })
             {
                 error!("delay_node_process_request: Cannot send response ({e})");
             }
@@ -141,14 +141,18 @@ async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, mut dev_evt_rx: Devic
                     emit_signal = false;
                     warn!("Device disconnected");
                 },
-                Err(err) => error!("Device event error: {err}"),
+                Err(err) => {
+                    error!("Device event error: {err}");
+                    return Ok(());
+                },
             },
-            _ = tokio::time::sleep(Duration::from_secs(3)).fuse() => { }
+            _ = futures_time::task::sleep(futures_time::time::Duration::from_secs(3)).fuse() => { }
 
         }
         if emit_signal {
             let sig = RpcMessage::new_signal("status/delayed", SIG_CHNG, Some(cnt.into()));
-            dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
+            // dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
+            dev_cmd_tx.unbounded_send(DeviceCommand::SendMessage { message: sig })?;
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
@@ -175,7 +179,7 @@ pub(crate) async fn main() -> shv::Result<()> {
         tokio::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter));
     };
 
-    ShvDevice::new()
+    shvdevice::Client::new()
         .mount(".app", APP_METHODS, app_node_routes())
         .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
         .mount("status/delayed", DELAY_METHODS, delay_node_routes())

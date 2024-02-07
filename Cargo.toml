@@ -10,13 +10,17 @@ name = "shvdevice"
 path = "src/lib.rs"
 
 [[bin]]
-name = "simple_device"
-path = "src/examples/simple_device.rs"
+name = "simple_device_tokio"
+path = "src/examples/simple_device_tokio.rs"
+
+[[bin]]
+name = "simple_device_async_std"
+path = "src/examples/simple_device_async_std.rs"
 
 [dependencies]
 shv = { git = "https://github.com/j4r0u53k/shv-rs.git", branch = "use-into-target-in-interfaces" }
 futures = "0.3.29"
-# async-std = { version = "1.12.0", features = ["attributes"] }
+async-std = { version = "1.12.0", features = ["attributes"] }
 url = "2.4.1"
 clap = { version = "4.4.12", features = ["derive"] }
 log = "0.4.20"
@@ -25,3 +29,5 @@ duration-str = "0.7.1"
 async-broadcast = "0.6.0"
 tokio = { version = "1.36.0", features = ["full"] }
 tokio-util = { version = "0.7.10", features = ["compat"] }
+futures-time = "3.0.0"
+futures-net = "0.6.0"

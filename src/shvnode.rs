@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::{HandlerFn, RequestData, RequestResult, Route, DeviceCommand, Sender};
+use crate::client::{HandlerFn, RequestData, RequestResult, Route, DeviceCommand, Sender};
 use log::{error, warn};
 use shv::metamethod::Access;
 use shv::metamethod::{Flag, MetaMethod};
@@ -364,8 +364,9 @@ impl<S> ShvNode<S> {
             }
         }
         if let Err(e) = rpc_command_sender
-            .send(DeviceCommand::SendMessage { message: resp })
-            .await
+            // .send(DeviceCommand::SendMessage { message: resp })
+            // .await
+            .unbounded_send(DeviceCommand::SendMessage { message: resp })
         {
             error!("process_dir_ls: Cannot send response ({e})");
         }
