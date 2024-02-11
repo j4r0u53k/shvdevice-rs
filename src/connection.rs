@@ -10,6 +10,7 @@ use shv::rpcframe::RpcFrame;
 use shv::util::login_from_url;
 use url::Url;
 use log::*;
+use generics_alias::*;
 
 enum Runtime {
     AsyncStd,
@@ -93,21 +94,18 @@ pub enum ConnectionCommand {
     SendMessage(RpcMessage),
 }
 
-// pub trait AsyncSendRead: futures::AsyncRead + Send + Unpin { }
-// impl<T: futures::AsyncRead + Send + Unpin> AsyncSendRead for T {}
-//
-// pub trait AsyncSendWrite: futures::AsyncWrite + Send + Unpin { }
-// impl<T: futures::AsyncWrite + Send + Unpin> AsyncSendWrite for T {}
-//
-// pub trait ConnectHookFuture<R: AsyncSendRead, W: AsyncSendWrite>: Future<Output = shv::Result<(R, W)>> { }
-// impl<R: AsyncSendRead, W: AsyncSendWrite, T: Future<Output = shv::Result<(R, W)>>> ConnectHookFuture<R, W> for T { }
+generics_def!(
+    ConnectBounds<
+        F: Future<Output = shv::Result<(R, W)>>,
+        R: futures::AsyncRead + Send + Unpin,
+        W: futures::AsyncWrite + Send + Unpin,
+    >
+);
 
-async fn connection_task<C, F, R, W>(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, connect: C) -> shv::Result<()>
+#[generics(ConnectBounds)]
+async fn connection_task<C>(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, connect: C) -> shv::Result<()>
 where
-    C: FnOnce(String) -> F + Clone,
-    F: Future<Output = shv::Result<(R, W)>>,
-    R: futures::AsyncRead + Send + Unpin,
-    W: futures::AsyncWrite + Send + Unpin,
+    C: FnOnce(String) -> F + Clone
 {
     let res = async {
         if let Some(time_str) = &config.reconnect_interval {
@@ -145,12 +143,13 @@ where
     // by conn_event_sender drop that occurs here.
 }
 
-async fn connection_loop<C, F, R, W>(config: &ClientConfig, conn_event_sender: &Sender<ConnectionEvent>, connect: C) -> shv::Result<()>
+#[generics(ConnectBounds)]
+async fn connection_loop<C>(
+    config: &ClientConfig,
+    conn_event_sender: &Sender<ConnectionEvent>,
+    connect: C) -> shv::Result<()>
 where
     C: FnOnce(String) -> F,
-    F: Future<Output = shv::Result<(R, W)>>,
-    R: futures::AsyncRead + Send + Unpin,
-    W: futures::AsyncWrite + Send + Unpin,
 {
     let url = Url::parse(&config.url)?;
     let (scheme, host, port) = (
