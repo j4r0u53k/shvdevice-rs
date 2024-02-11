@@ -3,8 +3,6 @@ name = "shvdevice-rs"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
 name = "shvdevice"
 path = "src/lib.rs"
@@ -12,25 +10,32 @@ path = "src/lib.rs"
 [[bin]]
 name = "simple_device_tokio"
 path = "src/examples/simple_device_tokio.rs"
+required-features = ["tokio"]
 
 [[bin]]
 name = "simple_device_async_std"
 path = "src/examples/simple_device_async_std.rs"
+required-features = ["async_std"]
 
 [dependencies]
 shv = { git = "https://github.com/j4r0u53k/shv-rs.git", branch = "use-into-target-in-interfaces" }
 futures = "0.3.29"
-async-std = { version = "1.12.0", features = ["attributes"] }
+async-std = { version = "1.12.0", features = ["attributes"], optional = true }
 url = "2.4.1"
 clap = { version = "4.4.12", features = ["derive"] }
 log = "0.4.20"
 simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
 duration-str = "0.7.1"
 async-broadcast = "0.6.0"
-tokio = { version = "1.36.0", features = ["full"] }
-tokio-util = { version = "0.7.10", features = ["compat"] }
+tokio = { version = "1.36.0", features = ["full"], optional = true }
+tokio-util = { version = "0.7.10", features = ["compat"], optional = true }
 futures-time = "3.0.0"
 futures-net = "0.6.0"
 generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", branch = "main" }
 # Re-export of proc macros in macro_magic does not work for some reason
 macro_magic = "0.5.0"
+
+[features]
+default = ["tokio"]
+tokio = ["dep:tokio", "dep:tokio-util"]
+async_std = ["dep:async-std"]

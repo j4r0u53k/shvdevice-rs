@@ -13,25 +13,32 @@ use log::*;
 use generics_alias::*;
 
 enum Runtime {
+    #[cfg(feature = "async_std")]
     AsyncStd,
+    #[cfg(feature = "tokio")]
     Tokio,
     Unknown,
 }
 
 fn current_task_runtime() -> Runtime {
+    #[cfg(feature = "async_std")]
     if let Some(_) = ::async_std::task::try_current() {
-        Runtime::AsyncStd
-    } else if let Ok(_) = ::tokio::runtime::Handle::try_current() {
-        Runtime::Tokio
-    } else {
-        Runtime::Unknown
+        return Runtime::AsyncStd;
     }
+    #[cfg(feature = "tokio")]
+    if let Ok(_) = ::tokio::runtime::Handle::try_current() {
+        return Runtime::Tokio;
+    }
+    Runtime::Unknown
+
 }
 
 pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
     match current_task_runtime() {
+        #[cfg(feature = "tokio")]
         Runtime::Tokio =>
             tokio::spawn_connection_task(config, conn_evt_tx),
+        #[cfg(feature = "async_std")]
         Runtime::AsyncStd =>
             async_std::spawn_connection_task(config, conn_evt_tx),
         _ =>
@@ -39,6 +46,7 @@ pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<Connecti
     };
 }
 
+#[cfg(feature = "tokio")]
 mod tokio {
     use super::{Sender, ClientConfig, connection_task, ConnectionEvent};
     use tokio::io::BufReader;
@@ -66,6 +74,7 @@ mod tokio {
     }
 }
 
+#[cfg(feature = "async_std")]
 mod async_std {
     use super::{Sender, ClientConfig, connection_task, ConnectionEvent};
     use futures_net::TcpStream;
