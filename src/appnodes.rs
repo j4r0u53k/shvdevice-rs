@@ -1,5 +1,5 @@
 use crate::shvnode::METH_PING;
-use crate::client::{RequestData, Route, DeviceCommand, Sender};
+use crate::client::{RequestData, Route, ClientCommand, Sender};
 use log::error;
 use shv::metamethod::{Access, Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcValue};
@@ -59,7 +59,7 @@ const APP_NODE: AppNode = AppNode {
 
 async fn app_node_process_request(
     req_data: RequestData,
-    rpc_command_sender: Sender<DeviceCommand>,
+    client_cmd_tx: Sender<ClientCommand>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
@@ -73,10 +73,10 @@ async fn app_node_process_request(
         };
         if let Some(val) = resp_value {
             resp.set_result(val);
-            if let Err(e) = rpc_command_sender
+            if let Err(e) = client_cmd_tx
                 // .send(DeviceCommand::SendMessage { message: resp })
                 // .await
-                .unbounded_send(DeviceCommand::SendMessage { message: resp })
+                .unbounded_send(ClientCommand::SendMessage { message: resp })
             {
                 error!("app_node_process_request: Cannot send response ({e})");
             }
@@ -138,7 +138,7 @@ const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
 
 async fn app_device_node_process_request(
     req_data: RequestData,
-    rpc_command_sender: Sender<DeviceCommand>,
+    client_cmd_tx: Sender<ClientCommand>,
 ) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
@@ -154,10 +154,10 @@ async fn app_device_node_process_request(
         };
         if let Some(val) = resp_value {
             resp.set_result(val);
-            if let Err(e) = rpc_command_sender
+            if let Err(e) = client_cmd_tx
                 // .send(DeviceCommand::SendMessage { message: resp })
                 // .await
-                .unbounded_send(DeviceCommand::SendMessage { message: resp })
+                .unbounded_send(ClientCommand::SendMessage { message: resp })
             {
                 error!("app_device_node_process_request: Cannot send response ({e})");
             }

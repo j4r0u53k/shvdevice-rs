@@ -25,7 +25,7 @@ pub struct RequestData {
     pub request: RpcMessage,
 }
 
-pub enum DeviceCommand {
+pub enum ClientCommand {
     SendMessage {
         message: RpcMessage,
     },
@@ -51,7 +51,7 @@ pub enum RequestResult {
 }
 
 pub type HandlerFn<S> = Box<
-    dyn for<'a> Fn(RequestData, Sender<DeviceCommand>, &'a mut Option<S>) -> LocalBoxFuture<'_, ()>,
+    dyn for<'a> Fn(RequestData, Sender<ClientCommand>, &'a mut Option<S>) -> LocalBoxFuture<'_, ()>,
 >;
 
 pub struct Route<S> {
@@ -87,28 +87,28 @@ impl<S> Route<S> {
 }
 
 #[derive(Clone)]
-pub enum DeviceEvent {
-    /// Device core sends this event when connected to a broker
+pub enum ClientEvent {
+    /// Client core broadcasts this event when connected to a broker
     Connected,
     Disconnected,
 }
 
-pub struct DeviceEventsReceiver(BroadcastReceiver<DeviceEvent>);
+pub struct ClientEventsReceiver(BroadcastReceiver<ClientEvent>);
 
-impl DeviceEventsReceiver {
-    pub async fn wait_for_event(&mut self) -> Result<DeviceEvent, RecvError> {
+impl ClientEventsReceiver {
+    pub async fn wait_for_event(&mut self) -> Result<ClientEvent, RecvError> {
         loop {
             match self.0.recv().await {
                 Ok(evt) => break Ok(evt),
                 Err(async_broadcast::RecvError::Overflowed(cnt)) => {
-                    warn!("Device event receiver missed {cnt} event(s)!");
+                    warn!("Client event receiver missed {cnt} event(s)!");
                 },
                 err => break err,
             }
         }
     }
 
-    pub fn recv_event(&mut self) -> Pin<Box<async_broadcast::Recv<'_, DeviceEvent>>> {
+    pub fn recv_event(&mut self) -> Pin<Box<async_broadcast::Recv<'_, ClientEvent>>> {
         self.0.recv()
     }
 }
@@ -116,14 +116,14 @@ impl DeviceEventsReceiver {
 
 pub struct Client<S> {
     mounts: BTreeMap<String, ShvNode<S>>,
-    state: Option<S>,
+    app_data: Option<S>,
 }
 
 impl<S> Client<S> {
     pub fn new() -> Self {
         Self {
             mounts: Default::default(),
-            state: Default::default(),
+            app_data: Default::default(),
         }
     }
 
@@ -139,64 +139,64 @@ impl<S> Client<S> {
         self
     }
 
-    pub fn with_state(&mut self, state: S) -> &mut Self {
-        self.state = Some(state);
+    pub fn with_app_data(&mut self, app_data: S) -> &mut Self {
+        self.app_data = Some(app_data);
         self
     }
 
     async fn run_with_init_opt<H>(&mut self, config: &ClientConfig, init_handler: Option<H>) -> shv::Result<()>
     where
-        H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
+        H: FnOnce(Sender<ClientCommand>, ClientEventsReceiver),
     {
         // let (conn_evt_tx, conn_evt_rx) = tokio::sync::mpsc::channel::<ConnectionEvent>(32);
         // let (conn_evt_tx, conn_evt_rx) = async_std::channel::unbounded::<ConnectionEvent>();
         let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
         spawn_connection_task(config, conn_evt_tx);
-        self.device_loop(conn_evt_rx, init_handler).await
+        self.client_loop(conn_evt_rx, init_handler).await
     }
 
     pub async fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
         self
-            .run_with_init_opt(config, Option::<fn(Sender<DeviceCommand>, DeviceEventsReceiver)>::None)
+            .run_with_init_opt(config, Option::<fn(Sender<ClientCommand>, ClientEventsReceiver)>::None)
             .await
     }
 
     pub async fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shv::Result<()>
     where
-        H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
+        H: FnOnce(Sender<ClientCommand>, ClientEventsReceiver),
     {
         self
             .run_with_init_opt(config, Some(handler))
             .await
     }
 
-    async fn device_loop<H>(&mut self, mut conn_event_receiver: Receiver<ConnectionEvent>, init_handler: Option<H>) -> shv::Result<()>
+    async fn client_loop<H>(&mut self, mut conn_events_rx: Receiver<ConnectionEvent>, init_handler: Option<H>) -> shv::Result<()>
     where
-        H: FnOnce(Sender<DeviceCommand>, DeviceEventsReceiver),
+        H: FnOnce(Sender<ClientCommand>, ClientEventsReceiver),
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
 
-        let (device_cmd_sender, mut device_cmd_receiver) =
+        let (client_cmd_tx, mut client_cmd_rx) =
             // tokio::sync::mpsc::channel::<DeviceCommand>(32);
             futures::channel::mpsc::unbounded();
-        let (mut device_events_tx, device_events_rx) = async_broadcast::broadcast(10);
-        device_events_tx.set_overflow(true);
-        let dev_events_receiver = DeviceEventsReceiver(device_events_rx.clone());
+        let (mut client_events_tx, client_events_rx) = async_broadcast::broadcast(10);
+        client_events_tx.set_overflow(true);
+        let client_events_receiver = ClientEventsReceiver(client_events_rx.clone());
         let mut conn_cmd_sender: Option<Sender<ConnectionCommand>> = None;
 
         if let Some(init_handler) = init_handler {
-            init_handler(device_cmd_sender.clone(), dev_events_receiver);
+            init_handler(client_cmd_tx.clone(), client_events_receiver);
         }
 
         loop {
             select! {
                 // device_cmd_result = device_cmd_receiver.recv().fuse() => match device_cmd_result {
-                device_cmd_result = device_cmd_receiver.next().fuse() => match device_cmd_result {
-                    Some(device_cmd) => {
+                client_cmd_result = client_cmd_rx.next().fuse() => match client_cmd_result {
+                    Some(client_cmd) => {
                     // Ok(device_cmd) => {
-                        use DeviceCommand::*;
-                        match device_cmd {
+                        use ClientCommand::*;
+                        match client_cmd {
                             SendMessage{message} => {
                                 if let Some(ref conn_cmd_sender) = conn_cmd_sender {
                                     // if let Err(e) = conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await {
@@ -211,7 +211,7 @@ impl<S> Client<S> {
                                     error!("request_id {req_id} for async RpcCall has already been registered");
                                 }
                                 // device_cmd_sender.send(SendMessage{ message: request }).await?;
-                                device_cmd_sender.unbounded_send(SendMessage{ message: request })?;
+                                client_cmd_tx.unbounded_send(SendMessage{ message: request })?;
                             },
                             Subscribe{path, /* methods, */ notifications_sender} => {
                                 if subscriptions.insert(path.clone(), notifications_sender).is_some() {
@@ -222,9 +222,9 @@ impl<S> Client<S> {
                                 //     .send(SendMessage { message: request })
                                 //     .await
                                 //     .expect("Cannot send subscription request through DeviceCommand channel");
-                                device_cmd_sender
+                                client_cmd_tx
                                     .unbounded_send(SendMessage { message: request })
-                                    .expect("Cannot send subscription request through DeviceCommand channel");
+                                    .expect("Cannot send subscription request through ClientCommand channel");
                             },
                             Unsubscribe{path} => {
                                 if let None = subscriptions.remove(&path) {
@@ -235,40 +235,40 @@ impl<S> Client<S> {
                                 //     .send(SendMessage { message: request })
                                 //     .await
                                 //     .expect("Cannot send subscription request through DeviceCommand channel");
-                                device_cmd_sender
+                                client_cmd_tx
                                     .unbounded_send(SendMessage { message: request })
-                                    .expect("Cannot send subscription request through DeviceCommand channel");
+                                    .expect("Cannot send subscription request through ClientCommand channel");
                             },
                         }
                     },
                     None => {
                     // Err(_) => {
-                        panic!("Couldn't get DeviceCommand from the channel");
+                        panic!("Couldn't get ClientCommand from the channel");
                     },
                 },
                 // conn_event_result = conn_event_receiver.recv().fuse() => match conn_event_result {
-                conn_event_result = conn_event_receiver.next().fuse() => match conn_event_result {
+                conn_event_result = conn_events_rx.next().fuse() => match conn_event_result {
                     Some(conn_event) => {
                     // Ok(conn_event) => {
                         use ConnectionEvent::*;
                         match conn_event {
                             RpcFrameReceived(frame) => {
-                                process_rpc_frame(&mut self.mounts, &mut self.state, &device_cmd_sender, &mut pending_rpc_calls, &mut subscriptions, frame)
+                                process_rpc_frame(&mut self.mounts, &mut self.app_data, &client_cmd_tx, &mut pending_rpc_calls, &mut subscriptions, frame)
                                     .await
                                     .expect("Cannot process RPC frame");
                             },
                             Connected(sender) => {
                                 conn_cmd_sender = Some(sender);
-                                if let Err(err) = device_events_tx.try_broadcast(DeviceEvent::Connected) {
-                                    error!("Device event `Connected` broadcast error: {err}");
+                                if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Connected) {
+                                    error!("Client event `Connected` broadcast error: {err}");
                                 }
                             },
                             Disconnected => {
                                 conn_cmd_sender = None;
                                 subscriptions.clear();
                                 pending_rpc_calls.clear();
-                                if let Err(err) = device_events_tx.try_broadcast(DeviceEvent::Disconnected) {
-                                    error!("Device event `Disconnected` broadcast error: {err}");
+                                if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Disconnected) {
+                                    error!("Client event `Disconnected` broadcast error: {err}");
                                 }
                             },
                         }
@@ -287,7 +287,7 @@ impl<S> Client<S> {
 async fn process_rpc_frame<S>(
     mounts: &mut BTreeMap<String, ShvNode<S>>,
     state: &mut Option<S>,
-    device_cmd_sender: &Sender<DeviceCommand>,
+    client_cmd_tx: &Sender<ClientCommand>,
     pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
     subscriptions: &mut HashMap<String, Sender<RpcFrame>>,
     frame: RpcFrame) -> shv::Result<()>
@@ -304,13 +304,13 @@ async fn process_rpc_frame<S>(
                             let node = mounts.get(mount).unwrap();
                             node.process_request(
                                 RequestData { mount_path: mount.into(), request: rpcmsg },
-                                device_cmd_sender.clone(),
+                                client_cmd_tx.clone(),
                                 state).await;
                         } else {
                             let method = frame.method().unwrap_or_default();
                             resp.set_error(RpcError::new(RpcErrorCode::MethodNotFound, &format!("Invalid shv path {}:{}()", shv_path, method)));
                             // device_cmd_sender.send(DeviceCommand::SendMessage { message: resp }).await?;
-                            device_cmd_sender.unbounded_send(DeviceCommand::SendMessage { message: resp })?;
+                            client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp })?;
                         }
                     }
                     Some(result) => {
@@ -318,12 +318,12 @@ async fn process_rpc_frame<S>(
                             RequestResult::Response(r) => {
                                 resp.set_result(r);
                                 // device_cmd_sender.send(DeviceCommand::SendMessage { message: resp }).await?;
-                                device_cmd_sender.unbounded_send(DeviceCommand::SendMessage { message: resp })?;
+                                client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp })?;
                             }
                             RequestResult::Error(e) => {
                                 resp.set_error(e);
                                 // device_cmd_sender.send(DeviceCommand::SendMessage { message: resp }).await?;
-                                device_cmd_sender.unbounded_send(DeviceCommand::SendMessage { message: resp })?;
+                                client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp })?;
                             }
                         }
                     }
@@ -356,8 +356,8 @@ async fn process_rpc_frame<S>(
                     // device_cmd_sender
                     //     .send(DeviceCommand::SendMessage { message: request })
                     //     .await?;
-                    device_cmd_sender
-                        .unbounded_send(DeviceCommand::SendMessage { message: request })?;
+                    client_cmd_tx
+                        .unbounded_send(ClientCommand::SendMessage { message: request })?;
                 }
             }
         }

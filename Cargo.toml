@@ -1,10 +1,10 @@
 [package]
-name = "shvdevice-rs"
-version = "0.1.0"
+name = "shvclient-rs"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
-name = "shvdevice"
+name = "shvclient"
 path = "src/lib.rs"
 
 [[bin]]

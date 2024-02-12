@@ -9,11 +9,11 @@ use log::*;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcMessage};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
-use shvdevice::appnodes::{
+use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
-use shvdevice::shvnode::SIG_CHNG;
-use shvdevice::{RequestData, Route, DeviceCommand, Sender, DeviceEventsReceiver, DeviceEvent};
+use shvclient::shvnode::SIG_CHNG;
+use shvclient::{RequestData, Route, ClientCommand, Sender, ClientEventsReceiver, ClientEvent};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -89,7 +89,7 @@ struct State(Arc<RwLock<i32>>);
 
 async fn delay_node_process_request(
     req_data: RequestData,
-    rpc_command_sender: Sender<DeviceCommand>,
+    client_cmd_tx: Sender<ClientCommand>,
     state: &mut Option<State>,
 ) {
     let rq = &req_data.request;
@@ -106,10 +106,10 @@ async fn delay_node_process_request(
             drop(counter);
             tokio::time::sleep(Duration::from_secs(3)).await;
             resp.set_result(ret_val.into());
-            if let Err(e) = rpc_command_sender
+            if let Err(e) = client_cmd_tx
                 // .send(DeviceCommand::SendMessage { message: resp })
                 // .await
-                .unbounded_send(DeviceCommand::SendMessage { message: resp })
+                .unbounded_send(ClientCommand::SendMessage { message: resp })
             {
                 error!("delay_node_process_request: Cannot send response ({e})");
             }
@@ -120,24 +120,24 @@ async fn delay_node_process_request(
 fn delay_node_routes() -> Vec<Route<State>> {
     [Route::new(
         [METH_GET_DELAYED],
-        shvdevice::handler!(delay_node_process_request),
+        shvclient::handler!(delay_node_process_request),
     )]
     .into()
 }
 
-async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, mut dev_evt_rx: DeviceEventsReceiver, app_data: State) -> shv::Result<()> {
+async fn emit_chng_task(client_cmd_tx: Sender<ClientCommand>, mut client_evt_rx: ClientEventsReceiver, app_data: State) -> shv::Result<()> {
     info!("signal task started");
 
     let mut cnt = 0;
     let mut emit_signal = true;
     loop {
         select! {
-            rx_event = dev_evt_rx.recv_event().fuse() => match rx_event {
-                Ok(DeviceEvent::Connected) => {
+            rx_event = client_evt_rx.recv_event().fuse() => match rx_event {
+                Ok(ClientEvent::Connected) => {
                     emit_signal = true;
                     warn!("Device connected");
                 },
-                Ok(DeviceEvent::Disconnected) => {
+                Ok(ClientEvent::Disconnected) => {
                     emit_signal = false;
                     warn!("Device disconnected");
                 },
@@ -152,7 +152,7 @@ async fn emit_chng_task(dev_cmd_tx: Sender<DeviceCommand>, mut dev_evt_rx: Devic
         if emit_signal {
             let sig = RpcMessage::new_signal("status/delayed", SIG_CHNG, Some(cnt.into()));
             // dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
-            dev_cmd_tx.unbounded_send(DeviceCommand::SendMessage { message: sig })?;
+            client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: sig })?;
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
@@ -175,15 +175,15 @@ pub(crate) async fn main() -> shv::Result<()> {
     let counter = State(Arc::new(RwLock::new(-10)));
     let cnt = counter.clone();
 
-    let app_tasks = move |dev_cmd_tx, dev_evt_rx| {
-        tokio::task::spawn(emit_chng_task(dev_cmd_tx, dev_evt_rx, counter));
+    let app_tasks = move |client_cmd_tx, client_evt_rx| {
+        tokio::task::spawn(emit_chng_task(client_cmd_tx, client_evt_rx, counter));
     };
 
-    shvdevice::Client::new()
+    shvclient::Client::new()
         .mount(".app", APP_METHODS, app_node_routes())
         .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
         .mount("status/delayed", DELAY_METHODS, delay_node_routes())
-        .with_state(cnt)
+        .with_app_data(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)
         .await
