@@ -383,20 +383,44 @@ fn create_subscription_request(path: &str, request: SubscriptionRequest) -> RpcM
 
 #[cfg(test)]
 mod tests {
+    #![allow(unused_macros)]
+    use super::*;
 
-    macro_rules! test_def{
-        ($name:ident) => {
+    macro_rules! def_test{
+        ($name:ident $(, $client:expr)?) => {
+            mk_test_fn_args!($name [ ] $($client)?);
+        };
+    }
+
+    macro_rules! def_test_failing{
+        ($name:ident $(, $client:expr)?) => {
+            mk_test_fn_args!($name [ #[should_panic] ] $($client)?);
+        };
+    }
+
+    macro_rules! mk_test_fn_args {
+        ($name:ident [ $(#[$attr:meta])* ] $client:expr) => {
+            mk_test_fn!($name [ $(#[$attr])* ] Some($client));
+        };
+        ($name:ident [ $(#[$attr:meta])* ] ) => {
+            mk_test_fn!($name [ $(#[$attr])* ] None::<$crate::Client<()>>);
+        };
+    }
+
+    macro_rules! mk_test_fn {
+        ($name:ident [ $(#[$attr:meta])* ] $client_opt:expr) => {
             #[test]
+            $(#[$attr])*
             fn $name() {
-                drivers::run_test(drivers::$name);
+                drivers::run_test(drivers::$name, $client_opt);
             }
         };
     }
 
-    test_def!(wait_for_connect);
-    test_def!(send_message);
-    test_def!(make_rpc_call);
-    test_def!(subscribe_and_notify);
+    def_test!(wait_for_connect);
+    def_test!(send_message);
+    def_test!(make_rpc_call);
+    def_test!(subscribe_and_notify);
 
     pub mod drivers {
         use futures::Future;
@@ -528,8 +552,8 @@ mod tests {
                       );
 
         #[generics(TestDriverBounds)]
-        async fn create_client(test_drv: C) {
-            let mut client = Client::<()>::new();
+        async fn init_client<S>(test_drv: C, custom_client: Option<Client<S>>) {
+            let mut client = if let Some(client) = custom_client { client } else { Client::<S>::new() };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
             let init_handler = move |cli_cmd_tx, cli_evt_rx| {
@@ -542,12 +566,12 @@ mod tests {
         }
 
         #[generics(TestDriverBounds)]
-        pub fn run_test(test_drv: C) {
+        pub fn run_test<S>(test_drv: C, custom_client: Option<Client<S>>) {
             #[cfg(feature = "tokio")]
             tokio::runtime::Builder::new_multi_thread()
                 .build()
                 .unwrap()
-                .block_on(create_client(test_drv));
+                .block_on(init_client(test_drv, custom_client));
         }
     }
 }
