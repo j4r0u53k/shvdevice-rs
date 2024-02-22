@@ -384,7 +384,7 @@ fn create_subscription_request(path: &str, request: SubscriptionRequest) -> RpcM
 #[cfg(test)]
 mod tests {
     #![allow(unused_macros)]
-    use super::*;
+    pub use super::*;
 
     macro_rules! def_test{
         ($name:ident $(, $client:expr)?) => {
@@ -417,31 +417,56 @@ mod tests {
         };
     }
 
-    def_test!(wait_for_connect);
+    def_test!(receive_connected_and_disconnected_events);
     def_test!(send_message);
-    def_test!(make_rpc_call);
-    def_test!(subscribe_and_notify);
+    def_test!(call_method_timeouts_when_disconnected);
+    def_test!(call_method_and_receive_response);
+    def_test!(receive_subscribed_notification);
+    def_test!(do_not_receive_unsubscribed_notification);
 
     pub mod drivers {
+        use super::*;
+        use futures_time::future::FutureExt;
+        use futures_time::time::Duration;
         use futures::Future;
         use generics_alias::*;
         use crate::shvnode::SIG_CHNG;
-        use super::super::*;
-        // use futures_time::time::Duration;
 
         struct ConnectionMock {
-            conn_cmd_rx: Receiver<ConnectionCommand>,
             conn_evt_tx: Sender<ConnectionEvent>,
+            conn_cmd_rx: Receiver<ConnectionCommand>,
+        }
+
+        impl Drop for ConnectionMock {
+            fn drop(&mut self) {
+                if let Err(_) = self.conn_evt_tx.unbounded_send(ConnectionEvent::Disconnected) {
+                    error!("Disconnected event send error");
+                }
+            }
         }
 
         impl ConnectionMock {
-            fn receive_response(&self, from_request: &RpcMessage, result: Option<RpcValue>) {
+            fn new(conn_evt_tx: &Sender<ConnectionEvent>) -> Self {
+                let (conn_cmd_tx, conn_cmd_rx) = futures::channel::mpsc::unbounded::<ConnectionCommand>();
+                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx)).expect("Connected event send error");
+                Self {
+                    conn_evt_tx: conn_evt_tx.clone(),
+                    conn_cmd_rx,
+                }
             }
 
-            fn receive_signal(&self, path: &str, sig_name: &str, param: Option<RpcValue>) {
+            fn emulate_receive_response(&self, from_request: &RpcMessage, result: impl Into<RpcValue>) {
+                let mut resp = from_request.prepare_response().unwrap();
+                resp.set_result(result);
+                self.conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(resp.to_frame().unwrap())).unwrap();
             }
 
-            async fn get_message_to_send(&mut self) -> RpcMessage {
+            fn emulate_receive_signal(&self, path: &str, sig_name: &str, param: Option<RpcValue>) {
+                let sig = RpcMessage::new_signal(path, sig_name, param);
+                self.conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(sig.to_frame().unwrap())).unwrap();
+            }
+
+            async fn expect_send_message(&mut self) -> RpcMessage {
                 let Some(ConnectionCommand::SendMessage(msg)) = self.conn_cmd_rx.next().await else {
                     panic!("ConnectionCommand receive error");
                 };
@@ -449,38 +474,51 @@ mod tests {
             }
         }
 
-        async fn init_connection(conn_evt_tx: &Sender<ConnectionEvent>,
-                                 cli_evt_rx: &mut ClientEventsReceiver) -> Receiver<ConnectionCommand>
-        {
-            let (conn_cmd_tx, conn_cmd_rx) = futures::channel::mpsc::unbounded::<ConnectionCommand>();
-            conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx)).expect("Connection event send error");
-
-            let ClientEvent::Connected = cli_evt_rx.wait_for_event().await.expect("connected event") else {
-                panic!("Unexpected client event");
+        async fn expect_client_connected(client_events_rx: &mut ClientEventsReceiver) {
+            let ClientEvent::Connected = client_events_rx.wait_for_event().await.expect("Client event receive") else {
+                panic!("Expected Connected client event");
             };
-            conn_cmd_rx
         }
 
-        pub async fn wait_for_connect(conn_evt_tx: Sender<ConnectionEvent>,
-                                      _cli_cmd_tx: Sender<ClientCommand>,
-                                      mut cli_evt_rx: ClientEventsReceiver)
+        async fn expect_client_disconnected(client_events_rx: &mut ClientEventsReceiver) {
+            let ClientEvent::Disconnected = client_events_rx.wait_for_event().await.expect("Client event receive") else {
+                panic!("Expected Disconnected client event");
+            };
+        }
+
+        async fn init_connection(conn_evt_tx: &Sender<ConnectionEvent>,
+                                 cli_evt_rx: &mut ClientEventsReceiver) -> ConnectionMock
         {
-            init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let conn_mock = ConnectionMock::new(conn_evt_tx);
+            expect_client_connected(cli_evt_rx).await;
+            conn_mock
+        }
+
+        pub async fn receive_connected_and_disconnected_events(conn_evt_tx: Sender<ConnectionEvent>,
+                                                               _cli_cmd_tx: Sender<ClientCommand>,
+                                                               mut client_events_rx: ClientEventsReceiver)
+        {
+            {
+                let _conn_mock = ConnectionMock::new(&conn_evt_tx);
+                expect_client_connected(&mut client_events_rx).await;
+            }
+            expect_client_disconnected(&mut client_events_rx).await;
+
+            let _conn_mock = ConnectionMock::new(&conn_evt_tx);
+            expect_client_connected(&mut client_events_rx).await;
         }
 
         pub async fn send_message(conn_evt_tx: Sender<ConnectionEvent>,
                                   cli_cmd_tx: Sender<ClientCommand>,
                                   mut cli_evt_rx: ClientEventsReceiver)
         {
-            let mut conn_cmd_rx = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
 
             cli_cmd_tx.unbounded_send(ClientCommand::SendMessage {
                 message: RpcMessage::new_request("path/test", "test_method", Some(42.into()))
             }).expect("Client command send");
 
-            let Some(ConnectionCommand::SendMessage(msg)) = conn_cmd_rx.next().await else {
-                panic!("ConnectionCommand receive error");
-            };
+            let msg = conn_mock.expect_send_message().await;
 
             assert!(msg.is_request());
             assert_eq!(msg.shv_path(), Some("path/test"));
@@ -497,23 +535,31 @@ mod tests {
             resp_rx
         }
 
-        pub async fn make_rpc_call(conn_evt_tx: Sender<ConnectionEvent>,
-                                  cli_cmd_tx: Sender<ClientCommand>,
-                                  mut cli_evt_rx: ClientEventsReceiver)
+        async fn receive_rpc_msg(rx: &mut Receiver<RpcFrame>) -> RpcMessage {
+            rx.next().await.unwrap().to_rpcmesage().unwrap()
+        }
+
+        pub async fn call_method_and_receive_response(conn_evt_tx: Sender<ConnectionEvent>,
+                                                  cli_cmd_tx: Sender<ClientCommand>,
+                                                  mut cli_evt_rx: ClientEventsReceiver)
         {
-            let mut conn_cmd_rx = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let mut resp_rx = do_rpc_call(&cli_cmd_tx, "path/to/resource", "get", None);
 
-            let Some(ConnectionCommand::SendMessage(req)) = conn_cmd_rx.next().await else {
-                panic!("ConnectionCommand receive error");
-            };
-            let mut resp = req.prepare_response().unwrap();
-            resp.set_result(42);
-            conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(resp.to_frame().unwrap())).unwrap();
+            let req = conn_mock.expect_send_message().await;
+            conn_mock.emulate_receive_response(&req, 42);
 
-            let resp = resp_rx.next().await.unwrap().to_rpcmesage().unwrap();
+            let resp = receive_rpc_msg(&mut resp_rx).await;
             assert!(resp.is_response());
             assert_eq!(resp.result().unwrap(), &RpcValue::from(42));
+        }
+
+        pub async fn call_method_timeouts_when_disconnected(_conn_evt_tx: Sender<ConnectionEvent>,
+                                                            cli_cmd_tx: Sender<ClientCommand>,
+                                                            mut _cli_evt_rx: ClientEventsReceiver)
+        {
+            let mut resp_rx = do_rpc_call(&cli_cmd_tx, "path/to/resource", "get", None);
+            receive_rpc_msg(&mut resp_rx).timeout(Duration::from_millis(3000)).await.expect_err("Unexpected method call response");
         }
 
         fn do_subscribe(cli_cmd_tx: &Sender<ClientCommand>, path: &str/*, signal_name: &str*/) -> Receiver<RpcFrame> {
@@ -525,24 +571,40 @@ mod tests {
             notify_rx
         }
 
-        pub async fn subscribe_and_notify(conn_evt_tx: Sender<ConnectionEvent>,
-                                           cli_cmd_tx: Sender<ClientCommand>,
-                                           mut cli_evt_rx: ClientEventsReceiver)
+        async fn check_notification_received(notify_rx: &mut Receiver<RpcFrame>, path: Option<&str>, method: Option<&str>, param: Option<&RpcValue>) {
+            let received_msg = receive_rpc_msg(notify_rx).await;
+            assert!(received_msg.is_signal());
+            assert_eq!(received_msg.shv_path(), path);
+            assert_eq!(received_msg.method(), method);
+            assert_eq!(received_msg.param(), param);
+        }
+
+        pub async fn receive_subscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
+                                                     cli_cmd_tx: Sender<ClientCommand>,
+                                                     mut cli_evt_rx: ClientEventsReceiver)
         {
-            let mut conn_cmd_rx = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let mut notify_rx = do_subscribe(&cli_cmd_tx, "path/to/resource");
 
-            let Some(ConnectionCommand::SendMessage(_req)) = conn_cmd_rx.next().await else {
-                panic!("ConnectionCommand receive error");
-            };
-            let sig_msg = RpcMessage::new_signal("path/to/resource", SIG_CHNG, Some(42.into()));
-            conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(sig_msg.to_frame().unwrap())).unwrap();
+            let _subscribe_req = conn_mock.expect_send_message().await;
 
-            let received_sig = notify_rx.next().await.unwrap().to_rpcmesage().unwrap();
-            assert!(received_sig.is_signal());
-            assert_eq!(received_sig.shv_path(), Some("path/to/resource"));
-            assert_eq!(received_sig.method(), Some(SIG_CHNG));
-            assert_eq!(received_sig.param(), Some(&RpcValue::from(42)));
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&RpcValue::from(42))).await;
+        }
+
+        pub async fn do_not_receive_unsubscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
+                                                              cli_cmd_tx: Sender<ClientCommand>,
+                                                              mut cli_evt_rx: ClientEventsReceiver)
+        {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut notify_rx = do_subscribe(&cli_cmd_tx, "path/to/resource");
+
+            let _subscribe_req = conn_mock.expect_send_message().await;
+            conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
+
+            receive_rpc_msg(&mut notify_rx)
+                .timeout(Duration::from_millis(1000)).await
+                .expect_err("Unexpected notification received");
         }
 
         generics_def!(TestDriverBounds <C, F> where
