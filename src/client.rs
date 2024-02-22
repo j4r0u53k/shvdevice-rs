@@ -383,53 +383,14 @@ fn create_subscription_request(path: &str, request: SubscriptionRequest) -> RpcM
 
 #[cfg(test)]
 mod tests {
-    #![allow(unused_macros)]
     pub use super::*;
-
-    macro_rules! def_test{
-        ($name:ident $(, $client:expr)?) => {
-            mk_test_fn_args!($name [ ] $($client)?);
-        };
-    }
-
-    macro_rules! def_test_failing{
-        ($name:ident $(, $client:expr)?) => {
-            mk_test_fn_args!($name [ #[should_panic] ] $($client)?);
-        };
-    }
-
-    macro_rules! mk_test_fn_args {
-        ($name:ident [ $(#[$attr:meta])* ] $client:expr) => {
-            mk_test_fn!($name [ $(#[$attr])* ] Some($client));
-        };
-        ($name:ident [ $(#[$attr:meta])* ] ) => {
-            mk_test_fn!($name [ $(#[$attr])* ] None::<$crate::Client<()>>);
-        };
-    }
-
-    macro_rules! mk_test_fn {
-        ($name:ident [ $(#[$attr:meta])* ] $client_opt:expr) => {
-            #[test]
-            $(#[$attr])*
-            fn $name() {
-                drivers::run_test(drivers::$name, $client_opt);
-            }
-        };
-    }
-
-    def_test!(receive_connected_and_disconnected_events);
-    def_test!(send_message);
-    def_test!(call_method_timeouts_when_disconnected);
-    def_test!(call_method_and_receive_response);
-    def_test!(receive_subscribed_notification);
-    def_test!(do_not_receive_unsubscribed_notification);
+    use futures::Future;
+    use generics_alias::*;
 
     pub mod drivers {
         use super::*;
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
-        use futures::Future;
-        use generics_alias::*;
         use crate::shvnode::SIG_CHNG;
 
         struct ConnectionMock {
@@ -526,6 +487,24 @@ mod tests {
             assert_eq!(msg.param(), Some(&RpcValue::from(42)));
         }
 
+        pub async fn send_message_fails(conn_evt_tx: Sender<ConnectionEvent>,
+                                        cli_cmd_tx: Sender<ClientCommand>,
+                                        mut cli_evt_rx: ClientEventsReceiver)
+        {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+
+            cli_cmd_tx.unbounded_send(ClientCommand::SendMessage {
+                message: RpcMessage::new_request("path/test", "test_method", Some(42.into()))
+            }).expect("Client command send");
+
+            let msg = conn_mock.expect_send_message().await;
+
+            assert!(msg.is_request());
+            assert_eq!(msg.shv_path(), Some("path/test"));
+            assert_eq!(msg.method(), Some("test_method"));
+            assert_eq!(msg.param(), Some(&RpcValue::from(41)));
+        }
+
         fn do_rpc_call(cli_cmd_tx: &Sender<ClientCommand>, path: &str, method: &str, param: Option<RpcValue>) -> Receiver<RpcFrame> {
             let (resp_tx, resp_rx) = futures::channel::mpsc::unbounded();
             cli_cmd_tx.unbounded_send(ClientCommand::RpcCall {
@@ -589,7 +568,13 @@ mod tests {
             let _subscribe_req = conn_mock.expect_send_message().await;
 
             conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
-            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&RpcValue::from(42))).await;
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(43.into()));
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("bar".into()));
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("baz".into()));
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
         }
 
         pub async fn do_not_receive_unsubscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
@@ -600,6 +585,7 @@ mod tests {
             let mut notify_rx = do_subscribe(&cli_cmd_tx, "path/to/resource");
 
             let _subscribe_req = conn_mock.expect_send_message().await;
+
             conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
 
             receive_rpc_msg(&mut notify_rx)
@@ -607,11 +593,56 @@ mod tests {
                 .expect_err("Unexpected notification received");
         }
 
-        generics_def!(TestDriverBounds <C, F> where
-                      C: FnOnce(Sender<ConnectionEvent>, Sender<ClientCommand>, ClientEventsReceiver) -> F,
-                      F: Future + Send + 'static,
-                      F::Output: Send + 'static,
-                      );
+    }
+
+    macro_rules! def_test{
+        ($name:ident $(, $client:expr)?) => {
+            mk_test_fn_args!($name [ ] $($client)?);
+        };
+    }
+
+    macro_rules! def_test_failing{
+        ($name:ident $(, $client:expr)?) => {
+            mk_test_fn_args!($name [ #[should_panic] ] $($client)?);
+        };
+    }
+
+    macro_rules! mk_test_fn_args {
+        ($name:ident [ $(#[$attr:meta])* ] $client:expr) => {
+            mk_test_fn!($name [ $(#[$attr])* ] Some($client));
+        };
+        ($name:ident [ $(#[$attr:meta])* ] ) => {
+            mk_test_fn!($name [ $(#[$attr])* ] None::<$crate::Client<()>>);
+        };
+    }
+
+    macro_rules! mk_test_fn {
+        ($name:ident [ $(#[$attr:meta])* ] $client_opt:expr) => {
+            #[test]
+            $(#[$attr])*
+            fn $name() {
+                run_test($crate::client::tests::drivers::$name, $client_opt);
+            }
+        };
+    }
+
+    generics_def!(TestDriverBounds <C, F> where
+                  C: FnOnce(Sender<ConnectionEvent>, Sender<ClientCommand>, ClientEventsReceiver) -> F,
+                  F: Future + Send + 'static,
+                  F::Output: Send + 'static,
+                  );
+
+    #[cfg(feature = "tokio")]
+    pub mod tokio {
+        use super::*;
+
+        def_test!(receive_connected_and_disconnected_events);
+        def_test!(send_message);
+        def_test_failing!(send_message_fails);
+        def_test!(call_method_timeouts_when_disconnected);
+        def_test!(call_method_and_receive_response);
+        def_test!(receive_subscribed_notification);
+        def_test!(do_not_receive_unsubscribed_notification);
 
         #[generics(TestDriverBounds)]
         async fn init_client<S>(test_drv: C, custom_client: Option<Client<S>>) {
@@ -619,7 +650,7 @@ mod tests {
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
             let init_handler = move |cli_cmd_tx, cli_evt_rx| {
-                let join_test_handle = tokio::task::spawn(test_drv(conn_evt_tx, cli_cmd_tx, cli_evt_rx));
+                let join_test_handle = ::tokio::task::spawn(test_drv(conn_evt_tx, cli_cmd_tx, cli_evt_rx));
                 join_handle_tx.unbounded_send(join_test_handle).unwrap();
             };
             client.client_loop(conn_evt_rx, Some(init_handler)).await.expect("Client loop terminated with an error");
@@ -629,11 +660,43 @@ mod tests {
 
         #[generics(TestDriverBounds)]
         pub fn run_test<S>(test_drv: C, custom_client: Option<Client<S>>) {
-            #[cfg(feature = "tokio")]
-            tokio::runtime::Builder::new_multi_thread()
+            ::tokio::runtime::Builder::new_multi_thread()
                 .build()
                 .unwrap()
                 .block_on(init_client(test_drv, custom_client));
         }
     }
+
+    #[cfg(feature = "async_std")]
+    pub mod async_std {
+        use super::*;
+
+        def_test!(receive_connected_and_disconnected_events);
+        def_test!(send_message);
+        def_test_failing!(send_message_fails);
+        def_test!(call_method_timeouts_when_disconnected);
+        def_test!(call_method_and_receive_response);
+        def_test!(receive_subscribed_notification);
+        def_test!(do_not_receive_unsubscribed_notification);
+
+        #[generics(TestDriverBounds)]
+        async fn init_client<S>(test_drv: C, custom_client: Option<Client<S>>) {
+            let mut client = if let Some(client) = custom_client { client } else { Client::<S>::new() };
+            let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
+            let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
+            let init_handler = move |cli_cmd_tx, cli_evt_rx| {
+                let join_test_handle = ::async_std::task::spawn(test_drv(conn_evt_tx, cli_cmd_tx, cli_evt_rx));
+                join_handle_tx.unbounded_send(join_test_handle).unwrap();
+            };
+            client.client_loop(conn_evt_rx, Some(init_handler)).await.expect("Client loop terminated with an error");
+            let join_handle = join_handle_rx.next().await.expect("fetch test join handle");
+            join_handle.await; //.expect("Test finished with error");
+        }
+
+        #[generics(TestDriverBounds)]
+        pub fn run_test<S>(test_drv: C, custom_client: Option<Client<S>>) {
+            ::async_std::task::block_on(init_client(test_drv, custom_client));
+        }
+    }
+
 }
