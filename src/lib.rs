@@ -1,5 +1,7 @@
 pub mod appnodes;
-pub mod shvnode;
-mod connection;
 mod client;
-pub use client::{Client, RequestData, Route, ClientCommand, Sender, ClientEventsReceiver, ClientEvent};
+mod connection;
+pub mod shvnode;
+pub use client::{
+    Client, ClientCommand, ClientEvent, ClientEventsReceiver, RequestData, Route, Sender,
+};

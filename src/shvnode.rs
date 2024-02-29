@@ -1,7 +1,8 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::client::{HandlerFn, RequestData, RequestResult, Route, ClientCommand, Sender};
+use crate::client::{ClientCommand, RequestHandler, RequestData, RequestResult, Route, Sender, MethodsGetter};
+use futures::channel::oneshot;
 use log::{error, warn};
 use shv::metamethod::Access;
 use shv::metamethod::{Flag, MetaMethod};
@@ -217,25 +218,25 @@ mod tests {
         );
     }
 
-    async fn dummy_handler(_: RequestData, _: Sender<ClientCommand>, _: &mut Option<()>) {}
+    fn dummy_handler(_: RequestData, _: Sender<ClientCommand>, _: &mut Option<()>) {}
 
     #[test]
     fn accept_valid_routes() {
-        ShvNode::new(PROPERTY_METHODS)
-            .add_route(Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler)));
-        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([METH_GET], handler!(dummy_handler)));
+        ShvNode::new_static(&PROPERTY_METHODS,
+                            vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
-        ShvNode::new(PROPERTY_METHODS).add_route(Route::new([SIG_CHNG], handler!(dummy_handler)));
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([SIG_CHNG], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        ShvNode::new(PROPERTY_METHODS).add_route(Route::new(["invalidMethod"], handler!(dummy_handler)));
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
     }
 }
 
@@ -280,80 +281,62 @@ pub fn find_longest_prefix<'a, 'b, V>(
     None
 }
 
-pub struct ShvNode<S> {
-    defined_methods: Vec<MetaMethod>,
-    method_handlers: BTreeMap<String, Rc<HandlerFn<S>>>,
+type StaticHandlers<S> = BTreeMap<String, Rc<RequestHandler<S>>>;
+
+struct StaticNode<'a, S> {
+    methods: Vec<&'a MetaMethod>,
+    handlers: BTreeMap<String, Rc<RequestHandler<S>>>,
 }
 
-impl<S> ShvNode<S> {
-    pub fn new<T: Into<Vec<MetaMethod>>>(methods: T) -> Self {
-        ShvNode {
-            defined_methods: methods.into(),
-            method_handlers: Default::default(),
+impl<'a, S> StaticNode<'a, S> {
+    fn new(methods: impl Iterator<Item = &'a MetaMethod>, routes: Vec<Route<S>>) -> Self {
+        let methods: Vec<&MetaMethod> = methods.collect();
+        Self {
+            methods: methods.clone(),
+            handlers: Self::add_routes(&methods, routes),
         }
     }
 
-    pub fn add_routes(mut self, routes: Vec<Route<S>>) -> Self {
+    fn add_routes(methods: &Vec<&'a MetaMethod>, routes: Vec<Route<S>>) -> StaticHandlers<S> {
+        let mut handlers: StaticHandlers<S> = Default::default();
         for route in routes {
-            self.add_route(route);
-        }
-        self
-    }
-
-    pub fn add_route(&mut self, route: Route<S>) -> &mut Self {
-        let handler = Rc::new(route.handler);
-        for m in &route.methods {
-            self.methods()
-                .iter()
-                .find(|dm| dm.name == m && (dm.flags & Flag::IsSignal as u32 == 0u32))
-                .expect("Invalid method {m}");
-            self.method_handlers.insert(m.clone(), handler.clone());
-        }
-        self
-    }
-
-    pub fn methods(&self) -> Vec<&MetaMethod> {
-        DIR_LS_METHODS
-            .iter()
-            .chain(self.defined_methods.iter())
-            .collect()
-    }
-
-    pub fn is_request_granted(&self, rq: &RpcMessage) -> bool {
-        let shv_path = rq.shv_path().unwrap_or_default();
-        if shv_path.is_empty() {
-            let level_str = rq.access().unwrap_or_default();
-            for level_str in level_str.split(',') {
-                if let Some(rq_level) = Access::from_str(level_str) {
-                    let method = rq.method().unwrap_or_default();
-                    for mm in self.methods().into_iter() {
-                        if mm.name == method {
-                            return rq_level >= mm.access;
-                        }
-                    }
-                }
+            let handler = Rc::new(route.handler);
+            for m in &route.methods {
+                Self::all_methods(methods)
+                    .iter()
+                    .find(|dm| dm.name == m && (dm.flags & Flag::IsSignal as u32 == 0u32))
+                    .expect("Invalid method {m}");
+                handlers.insert(m.clone(), handler.clone());
             }
         }
-        false
+        handlers
     }
 
-    pub async fn process_request(
+    fn all_methods(defined_methods: &Vec<&'a MetaMethod>) -> Vec<&'a MetaMethod> {
+        DIR_LS_METHODS.iter().chain(defined_methods.clone()).collect()
+    }
+
+    fn methods(&self) -> Vec<&'a MetaMethod> {
+        Self::all_methods(&self.methods)
+    }
+
+    fn process_request(
         &self,
         req_data: RequestData,
-        rpc_command_sender: Sender<ClientCommand>,
+        client_cmd_sender: Sender<ClientCommand>,
         app_data: &mut Option<S>,
-    ) {
+        ) {
         let rq = &req_data.request;
         if let Some(method) = rq.method() {
-            if let Some(handler) = self.method_handlers.get(method) {
-                handler(req_data.clone(), rpc_command_sender.clone(), app_data).await;
+            if let Some(handler) = self.handlers.get(method) {
+                handler(req_data.clone(), client_cmd_sender.clone(), app_data);
             } else {
-                self.process_dir_ls(rq, rpc_command_sender).await;
+                self.process_dir_ls(rq, client_cmd_sender);
             }
         }
     }
 
-    async fn process_dir_ls(&self, rq: &RpcMessage, rpc_command_sender: Sender<ClientCommand>) {
+    fn process_dir_ls(&self, rq: &RpcMessage, client_cmd_sender: Sender<ClientCommand>) {
         let mut resp = rq.prepare_response().unwrap_or_default(); // FIXME: better handling
         match self.dir_ls(rq) {
             RequestResult::Response(val) => {
@@ -363,9 +346,7 @@ impl<S> ShvNode<S> {
                 resp.set_error(err);
             }
         }
-        if let Err(e) = rpc_command_sender
-            // .send(DeviceCommand::SendMessage { message: resp })
-            // .await
+        if let Err(e) = client_cmd_sender
             .unbounded_send(ClientCommand::SendMessage { message: resp })
         {
             error!("process_dir_ls: Cannot send response ({e})");
@@ -422,6 +403,102 @@ impl<S> ShvNode<S> {
         }
     }
 }
+
+struct DynamicNode<S> {
+    methods: MethodsGetter<S>,
+    handler: RequestHandler<S>,
+}
+
+enum ShvNodeInner<'a, S> {
+    Static(StaticNode<'a, S>),
+    Dynamic(DynamicNode<S>),
+}
+
+pub struct ShvNode<'a, S>(ShvNodeInner<'a, S>);
+
+impl<'a, S> ShvNode<'a, S> {
+    pub fn new_static(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl Into<Vec<Route<S>>>) -> Self {
+        Self(ShvNodeInner::Static(StaticNode::new(methods.into_iter(), routes.into())))
+    }
+
+    pub fn new_dynamic(methods: MethodsGetter<S>, handler: RequestHandler<S>) -> Self {
+        Self(ShvNodeInner::Dynamic(DynamicNode { methods, handler }))
+    }
+
+    pub fn methods(&self, path: &str, app_data: &mut Option<S>) -> oneshot::Receiver<Vec<&'a MetaMethod>> {
+        let (res_tx, res_rx) = oneshot::channel();
+        match &self.0 {
+            ShvNodeInner::Static(node) => {
+                res_tx.send(node.methods()).unwrap();
+            },
+            ShvNodeInner::Dynamic(node) => {
+                (node.methods)(path, res_tx, app_data);
+            }
+        }
+        res_rx
+    }
+
+    pub fn process_request(
+        &self,
+        req_data: RequestData,
+        client_cmd_sender: Sender<ClientCommand>,
+        app_data: &mut Option<S>,
+        ) {
+        match &self.0 {
+            ShvNodeInner::Static(node) => {
+                node.process_request(req_data, client_cmd_sender, app_data);
+            },
+            ShvNodeInner::Dynamic(node) => {
+                (node.handler)(req_data, client_cmd_sender, app_data);
+            }
+        }
+    }
+}
+
+pub enum RequestAccessResult {
+    Ok,
+    // Err(RpcErrorCode, String),
+    Err(RpcError)
+}
+
+pub fn check_request_access<'a>(rq: &RpcMessage, methods: impl IntoIterator<Item = &'a MetaMethod>) -> RequestAccessResult {
+    let level_str = rq.access().unwrap_or_default();
+    for level_str in level_str.split(',') {
+        if let Some(rq_level) = Access::from_str(level_str) {
+            let method = rq.method().unwrap_or_default();
+            for mm in methods {
+                if mm.name == method {
+                    return if rq_level >= mm.access {
+                        RequestAccessResult::Ok
+                    } else {
+                        RequestAccessResult::Err(
+                            RpcError::new(
+                                RpcErrorCode::PermissionDenied,
+                                format!("Insufficient permissions. Method '{}' called with  access level '{:?}', required '{:?}'",
+                                        method,
+                                        rq_level,
+                                        mm.access)
+                                )
+                            )
+                    }
+                }
+            }
+            return RequestAccessResult::Err(
+                RpcError::new(
+                    RpcErrorCode::MethodNotFound,
+                    format!("Method {method} does not exist on path {}", rq.shv_path().unwrap_or_default())
+                    )
+                );
+        }
+    }
+    RequestAccessResult::Err(
+        RpcError::new(
+            RpcErrorCode::PermissionDenied,
+            format!("Request with undefined access level")
+            )
+        )
+}
+
 
 pub const METH_DIR: &str = "dir";
 pub const METH_LS: &str = "ls";

@@ -57,10 +57,7 @@ const APP_NODE: AppNode = AppNode {
     shv_version_minor: 0,
 };
 
-async fn app_node_process_request(
-    req_data: RequestData,
-    client_cmd_tx: Sender<ClientCommand>,
-) {
+fn app_node_process_request(req_data: RequestData, client_cmd_tx: Sender<ClientCommand>) {
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
         let mut resp = rq.prepare_response().unwrap_or_default();
@@ -136,7 +133,7 @@ const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
     serial_number: None,
 };
 
-async fn app_device_node_process_request(
+fn app_device_node_process_request(
     req_data: RequestData,
     client_cmd_tx: Sender<ClientCommand>,
 ) {

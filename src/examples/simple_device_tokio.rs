@@ -7,13 +7,13 @@ use clap::Parser;
 use futures::{select, FutureExt};
 use log::*;
 use shv::metamethod::{Flag, MetaMethod};
-use shv::{RpcMessageMetaTags, RpcMessage};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
+use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvclient::shvnode::SIG_CHNG;
-use shvclient::{RequestData, Route, ClientCommand, Sender, ClientEventsReceiver, ClientEvent};
+use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, RequestData, Route, Sender};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -87,7 +87,7 @@ const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
 #[derive(Clone)]
 struct State(Arc<RwLock<i32>>);
 
-async fn delay_node_process_request(
+fn delay_node_process_request(
     req_data: RequestData,
     client_cmd_tx: Sender<ClientCommand>,
     state: &mut Option<State>,
@@ -95,10 +95,23 @@ async fn delay_node_process_request(
     let rq = &req_data.request;
     if rq.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(rq.method(), Some(METH_GET_DELAYED));
-        let mut counter = state.as_mut().expect("Missing state for delay node")
-            .0.clone().write_owned().await;
+        let mut state = state.clone();
+        // let mut counter = state
+        //     .as_mut()
+        //     .expect("Missing state for delay node")
+        //     .0
+        //     .clone()
+        //     .write_owned()
+        //     .await;
         let mut resp = rq.prepare_response().unwrap_or_default();
         tokio::task::spawn(async move {
+            let mut counter = state
+                .as_mut()
+                .expect("Missing state for delay node")
+                .0
+                .clone()
+                .write_owned()
+                .await;
             let ret_val = {
                 *counter += 1;
                 *counter
@@ -125,7 +138,11 @@ fn delay_node_routes() -> Vec<Route<State>> {
     .into()
 }
 
-async fn emit_chng_task(client_cmd_tx: Sender<ClientCommand>, mut client_evt_rx: ClientEventsReceiver, app_data: State) -> shv::Result<()> {
+async fn emit_chng_task(
+    client_cmd_tx: Sender<ClientCommand>,
+    mut client_evt_rx: ClientEventsReceiver,
+    app_data: State,
+) -> shv::Result<()> {
     info!("signal task started");
 
     let mut cnt = 0;
@@ -180,9 +197,9 @@ pub(crate) async fn main() -> shv::Result<()> {
     };
 
     shvclient::Client::new()
-        .mount(".app", APP_METHODS, app_node_routes())
-        .mount(".app/device", APP_DEVICE_METHODS, app_device_node_routes())
-        .mount("status/delayed", DELAY_METHODS, delay_node_routes())
+        .mount_static(".app", &APP_METHODS, app_node_routes())
+        .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
+        .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
         .with_app_data(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)

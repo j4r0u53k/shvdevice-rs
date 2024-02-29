@@ -1,7 +1,8 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode};
+use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, check_request_access, RequestAccessResult};
 use async_broadcast::RecvError;
-use futures::future::LocalBoxFuture;
+use futures::channel::oneshot;
+use futures::stream::FuturesUnordered;
 use futures::{select, FutureExt, StreamExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
@@ -17,6 +18,9 @@ pub type Sender<K> = futures::channel::mpsc::UnboundedSender<K>;
 pub type Receiver<K> = futures::channel::mpsc::UnboundedReceiver<K>;
 
 type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
+
+type OneshotSender<T> = futures::channel::oneshot::Sender<T>;
+type OneshotReceiver<T> = futures::channel::oneshot::Receiver<T>;
 
 #[derive(Clone)]
 pub struct RequestData {
@@ -49,31 +53,36 @@ pub enum RequestResult {
     Error(RpcError),
 }
 
-pub type HandlerFn<S> = Box<
-    dyn for<'a> Fn(RequestData, Sender<ClientCommand>, &'a mut Option<S>) -> LocalBoxFuture<'_, ()>,
->;
+// pub type HandlerFn<S> = Box<
+//     dyn for<'a> Fn(RequestData, Sender<ClientCommand>, &'a mut Option<S>) -> BoxFuture<'_, ()>,
+// >;
+
+pub type RequestHandler<S> = Box<dyn Fn(RequestData, Sender<ClientCommand>, &mut Option<S>)>;
+pub type MethodsGetter<S> = Box<dyn Fn(&str, OneshotSender<Vec<&MetaMethod>>, &mut Option<S>)>;
 
 pub struct Route<S> {
-    pub handler: HandlerFn<S>,
+    pub handler: RequestHandler<S>,
     pub methods: Vec<String>,
 }
 
 #[macro_export]
 macro_rules! handler {
     ($func:ident) => {
-        Box::new(move |r, s, t| Box::pin($func(r, s, t)))
+        // Box::new(move |r, s, t| Box::pin($func(r, s, t)))
+        Box::new(move |r, s, t| $func(r, s, t))
     };
 }
 
 #[macro_export]
 macro_rules! handler_stateless {
     ($func:ident) => {
-        Box::new(move |r, s, _t| Box::pin($func(r, s)))
+        // Box::new(move |r, s, _t| Box::pin($func(r, s)))
+        Box::new(move |r, s, _t| $func(r, s))
     };
 }
 
 impl<S> Route<S> {
-    pub fn new<I>(methods: I, handler: HandlerFn<S>) -> Self
+    pub fn new<I>(methods: I, handler: RequestHandler<S>) -> Self
     where
         I: IntoIterator,
         I::Item: Into<String>,
@@ -113,9 +122,11 @@ impl ClientEventsReceiver {
 }
 
 pub struct Client<S> {
-    mounts: BTreeMap<String, ShvNode<S>>,
+    mounts: BTreeMap<String, ShvNode<'static, S>>,
     app_data: Option<S>,
 }
+
+type UnresolvedReqOutput = (RequestData, Result<Vec<&'static MetaMethod>, oneshot::Canceled>);
 
 impl<S> Client<S> {
     pub fn new() -> Self {
@@ -125,14 +136,21 @@ impl<S> Client<S> {
         }
     }
 
-    pub fn mount<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
+    pub fn mount_static<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
     where
         P: AsRef<str>,
-        M: Into<Vec<MetaMethod>>,
+        M: IntoIterator<Item = &'static MetaMethod>,
         R: Into<Vec<Route<S>>>,
     {
         let path = path.as_ref();
-        let node = ShvNode::new(defined_methods).add_routes(routes.into());
+        let node = ShvNode::new_static(defined_methods, routes);
+        self.mounts.insert(path.into(), node);
+        self
+    }
+
+    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<S>, request_handler: RequestHandler<S>) -> &mut Self {
+        let path = path.as_ref();
+        let node = ShvNode::new_dynamic(methods_getter, request_handler);
         self.mounts.insert(path.into(), node);
         self
     }
@@ -180,6 +198,7 @@ impl<S> Client<S> {
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
+        let mut unresolved_requests = FuturesUnordered::new();
 
         let (client_cmd_tx, mut client_cmd_rx) =
                 futures::channel::mpsc::unbounded();
@@ -242,9 +261,14 @@ impl<S> Client<S> {
                         use ConnectionEvent::*;
                         match conn_event {
                             RpcFrameReceived(frame) => {
-                                self.process_rpc_frame(frame, &client_cmd_tx,  &mut pending_rpc_calls, &mut subscriptions)
-                                    .await
-                                    .expect("Cannot process RPC frame");
+                                if let Some((rq_data, methods_res_rx)) = self.process_rpc_frame(
+                                    frame,
+                                    &client_cmd_tx,
+                                    &mut pending_rpc_calls,
+                                    &mut subscriptions)
+                                    .expect("Cannot process RPC frame") {
+                                        unresolved_requests.push(Self::mk_unresolved_rq(rq_data, methods_res_rx));
+                                    }
                             },
                             Connected(sender) => {
                                 conn_cmd_sender = Some(sender);
@@ -266,18 +290,69 @@ impl<S> Client<S> {
                         warn!("Connection task terminated, exiting");
                         return Ok(());
                     }
+                },
+                (req_data, methods_result) = unresolved_requests.select_next_some() => {
+                    self.resolve_request(methods_result, req_data, &client_cmd_tx)?;
                 }
             }
         }
     }
 
-    async fn process_rpc_frame(
+    async fn mk_unresolved_rq(rq_data: RequestData, methods_res_rx: OneshotReceiver<Vec<&'static MetaMethod>>)
+        -> UnresolvedReqOutput {
+            (rq_data, methods_res_rx.await)
+    }
+
+    fn resolve_request(
+        &mut self,
+        methods_result: Result<Vec<&MetaMethod>, oneshot::Canceled>,
+        request_data: RequestData,
+        client_cmd_tx: &Sender<ClientCommand>) -> shv::Result<()>
+    {
+        match methods_result {
+            Ok(methods) => { // Resolved
+                match check_request_access(&request_data.request, methods) {
+                    RequestAccessResult::Ok => {
+                        let node = self.mounts.get(&request_data.mount_path)
+                            .expect(&format!("node on path `{}` should exist", &request_data.mount_path));
+                        node.process_request(request_data, client_cmd_tx.clone(), &mut self.app_data);
+                    },
+                    RequestAccessResult::Err(err) => {
+                        let mut resp = request_data.request.prepare_response()
+                            .expect("should be able to prepare response");
+                        warn!("Check request access on path: {}/{}, error: {}",
+                              &request_data.request.shv_path().unwrap_or_default(),
+                              &request_data.mount_path,
+                              err);
+                        resp.set_error(err);
+                        client_cmd_tx
+                            .unbounded_send(ClientCommand::SendMessage { message: resp })?;
+                    }
+                }
+            },
+            Err(_) => { // methods_result tx closed before returning the result
+                let mut resp = request_data.request.prepare_response()
+                    .expect("should be able to prepare response");
+                resp.set_error(RpcError::new(
+                        RpcErrorCode::MethodCallCancelled,
+                        &format!("Could not find any methods on shv path {}/{}",
+                              &request_data.request.shv_path().unwrap_or_default(),
+                              &request_data.mount_path),
+                        ));
+                client_cmd_tx
+                    .unbounded_send(ClientCommand::SendMessage { message: resp })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn process_rpc_frame(
         &mut self,
         frame: RpcFrame,
         client_cmd_tx: &Sender<ClientCommand>,
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
         subscriptions: &mut HashMap<String, Sender<RpcFrame>>,
-    ) -> shv::Result<()> {
+    ) -> shv::Result<Option<(RequestData, OneshotReceiver<Vec<&'static MetaMethod>>)>> {
         if frame.is_request() {
             if let Ok(mut rpcmsg) = frame.to_rpcmesage() {
                 if let Ok(mut resp) = rpcmsg.prepare_response() {
@@ -289,16 +364,19 @@ impl<S> Client<S> {
                                 find_longest_prefix(&self.mounts, &shv_path)
                             {
                                 rpcmsg.set_shvpath(path);
+                                let request_data = RequestData {
+                                    mount_path: mount.into(),
+                                    request: rpcmsg,
+                                };
                                 let node = self.mounts.get(mount).unwrap();
-                                node.process_request(
-                                    RequestData {
-                                        mount_path: mount.into(),
-                                        request: rpcmsg,
-                                    },
-                                    client_cmd_tx.clone(),
-                                    &mut self.app_data,
-                                )
-                                .await;
+                                let mut methods_res_rx = node.methods(path, &mut self.app_data);
+                                let methods_res = methods_res_rx.try_recv();
+                                if let Ok(None) = methods_res {
+                                    // Unresolved, will be resolved asynchronously
+                                    return Ok(Some((request_data, methods_res_rx)));
+                                }
+                                let methods_res = methods_res.and_then(|opt| Ok(opt.expect("should be Some")));
+                                self.resolve_request(methods_res, request_data, client_cmd_tx)?;
                             } else {
                                 let method = frame.method().unwrap_or_default();
                                 resp.set_error(RpcError::new(
@@ -361,7 +439,7 @@ impl<S> Client<S> {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 }
 
