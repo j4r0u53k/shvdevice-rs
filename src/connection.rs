@@ -1,65 +1,44 @@
-pub use crate::Sender;
+use crate::runtime::{current_task_runtime, Runtime};
 use crate::shvnode::METH_PING;
+pub use crate::Sender;
 use duration_str::parse;
-use futures::{Future, FutureExt, select, StreamExt};
-use shv::framerw::{FrameReader, FrameWriter};
-use shv::{RpcMessage, client};
+use futures::{select, Future, FutureExt, StreamExt};
+use generics_alias::*;
+use log::*;
+pub use shv::client::ClientConfig;
 use shv::client::LoginParams;
-pub use shv::client::{ClientConfig};
+use shv::framerw::{FrameReader, FrameWriter};
 use shv::rpcframe::RpcFrame;
 use shv::util::login_from_url;
+use shv::{client, RpcMessage};
 use url::Url;
-use log::*;
-use generics_alias::*;
-
-enum Runtime {
-    #[cfg(feature = "async_std")]
-    AsyncStd,
-    #[cfg(feature = "tokio")]
-    Tokio,
-    Unknown,
-}
-
-fn current_task_runtime() -> Runtime {
-    #[cfg(feature = "async_std")]
-    if let Some(_) = ::async_std::task::try_current() {
-        return Runtime::AsyncStd;
-    }
-    #[cfg(feature = "tokio")]
-    if let Ok(_) = ::tokio::runtime::Handle::try_current() {
-        return Runtime::Tokio;
-    }
-    Runtime::Unknown
-
-}
 
 pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
     match current_task_runtime() {
         #[cfg(feature = "tokio")]
-        Runtime::Tokio =>
-            tokio::spawn_connection_task(config, conn_evt_tx),
+        Runtime::Tokio => tokio::spawn_connection_task(config, conn_evt_tx),
         #[cfg(feature = "async_std")]
-        Runtime::AsyncStd =>
-            async_std::spawn_connection_task(config, conn_evt_tx),
-        _ =>
-            panic!("Could not find suitable async runtime"),
+        Runtime::AsyncStd => async_std::spawn_connection_task(config, conn_evt_tx),
+        _ => panic!("Could not find suitable async runtime"),
     };
 }
 
 #[cfg(feature = "tokio")]
 mod tokio {
-    use super::{Sender, ClientConfig, connection_task, ConnectionEvent};
+    use super::{connection_task, ClientConfig, ConnectionEvent, Sender};
     use tokio::io::BufReader;
-    use tokio::net::TcpStream;
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt, Compat};
+    use tokio::net::TcpStream;
+    use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
         tokio::spawn(connection_task(config.clone(), conn_evt_tx, connect));
     }
 
-    async fn connect(address: String) -> shv::Result<(Compat<BufReader<OwnedReadHalf>>, Compat<OwnedWriteHalf>)>
-    // async fn connect(address: String) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)>
+    async fn connect(
+        address: String,
+    ) -> shv::Result<(Compat<BufReader<OwnedReadHalf>>, Compat<OwnedWriteHalf>)>
+// async fn connect(address: String) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)>
     {
         // let stream = TcpStream::connect(&address.parse()?).await?;
         // let (reader, writer) = stream.split();
@@ -76,16 +55,21 @@ mod tokio {
 
 #[cfg(feature = "async_std")]
 mod async_std {
-    use super::{Sender, ClientConfig, connection_task, ConnectionEvent};
-    use futures_net::TcpStream;
-    use futures::AsyncReadExt;
+    use super::{connection_task, ClientConfig, ConnectionEvent, Sender};
     use futures::io::{BufReader, ReadHalf, WriteHalf};
+    use futures::AsyncReadExt;
+    use futures_net::TcpStream;
 
-    pub(super) fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
+    pub(super) fn spawn_connection_task(
+        config: &ClientConfig,
+        conn_evt_tx: Sender<ConnectionEvent>,
+    ) {
         async_std::task::spawn(connection_task(config.clone(), conn_evt_tx, connect));
     }
 
-    async fn connect(address: String) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)> {
+    async fn connect(
+        address: String,
+    ) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)> {
         let stream = TcpStream::connect(&address.parse()?).await?;
         let (reader, writer) = stream.split();
         let reader = BufReader::new(reader);
@@ -114,7 +98,7 @@ generics_def!(
 #[generics(ConnectBounds)]
 async fn connection_task<C>(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, connect: C) -> shv::Result<()>
 where
-    C: FnOnce(String) -> F + Clone
+    C: FnOnce(String) -> F + Clone,
 {
     let res = async {
         if let Some(time_str) = &config.reconnect_interval {
@@ -141,7 +125,8 @@ where
         } else {
             connection_loop(&config, &conn_event_sender, connect).await
         }
-    }.await;
+    }
+    .await;
 
     match &res {
         Ok(_) => info!("Connection task finished OK"),
@@ -156,7 +141,8 @@ where
 async fn connection_loop<C>(
     config: &ClientConfig,
     conn_event_sender: &Sender<ConnectionEvent>,
-    connect: C) -> shv::Result<()>
+    connect: C,
+) -> shv::Result<()>
 where
     C: FnOnce(String) -> F,
 {
@@ -165,7 +151,7 @@ where
         url.scheme(),
         url.host_str().unwrap_or_default(),
         url.port().unwrap_or(3755),
-        );
+    );
     if scheme != "tcp" {
         panic!("Scheme {scheme} is not supported yet.");
     }

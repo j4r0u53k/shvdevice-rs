@@ -13,7 +13,7 @@ use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvclient::shvnode::SIG_CHNG;
-use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, RequestData, Route, Sender};
+use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -84,33 +84,21 @@ const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
     description: "",
 }];
 
-#[derive(Clone)]
-struct State(Arc<RwLock<i32>>);
+type State = RwLock<i32>;
 
-fn delay_node_process_request(
-    req_data: RequestData,
+async fn delay_node_process_request(
+    request: RpcMessage,
     client_cmd_tx: Sender<ClientCommand>,
-    state: &mut Option<State>,
+    mut state: Option<Arc<State>>,
 ) {
-    let rq = &req_data.request;
-    if rq.shv_path().unwrap_or_default().is_empty() {
-        assert_eq!(rq.method(), Some(METH_GET_DELAYED));
-        let mut state = state.clone();
-        // let mut counter = state
-        //     .as_mut()
-        //     .expect("Missing state for delay node")
-        //     .0
-        //     .clone()
-        //     .write_owned()
-        //     .await;
-        let mut resp = rq.prepare_response().unwrap_or_default();
+    if request.shv_path().unwrap_or_default().is_empty() {
+        assert_eq!(request.method(), Some(METH_GET_DELAYED));
+        let mut resp = request.prepare_response().unwrap_or_default();
         tokio::task::spawn(async move {
             let mut counter = state
                 .as_mut()
                 .expect("Missing state for delay node")
-                .0
-                .clone()
-                .write_owned()
+                .write()
                 .await;
             let ret_val = {
                 *counter += 1;
@@ -119,11 +107,7 @@ fn delay_node_process_request(
             drop(counter);
             tokio::time::sleep(Duration::from_secs(3)).await;
             resp.set_result(ret_val.into());
-            if let Err(e) = client_cmd_tx
-                // .send(DeviceCommand::SendMessage { message: resp })
-                // .await
-                .unbounded_send(ClientCommand::SendMessage { message: resp })
-            {
+            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
                 error!("delay_node_process_request: Cannot send response ({e})");
             }
         });
@@ -141,7 +125,7 @@ fn delay_node_routes() -> Vec<Route<State>> {
 async fn emit_chng_task(
     client_cmd_tx: Sender<ClientCommand>,
     mut client_evt_rx: ClientEventsReceiver,
-    app_data: State,
+    app_data: Arc<State>,
 ) -> shv::Result<()> {
     info!("signal task started");
 
@@ -173,7 +157,7 @@ async fn emit_chng_task(
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
-        let state = app_data.0.read().await;
+        let state = app_data.read().await;
         info!("state: {state}");
     }
 }
@@ -189,7 +173,7 @@ pub(crate) async fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = State(Arc::new(RwLock::new(-10)));
+    let counter = Arc::new(RwLock::new(-10));
     let cnt = counter.clone();
 
     let app_tasks = move |client_cmd_tx, client_evt_rx| {

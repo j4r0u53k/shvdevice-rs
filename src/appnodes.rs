@@ -1,8 +1,8 @@
 use crate::shvnode::METH_PING;
-use crate::client::{RequestData, Route, ClientCommand, Sender};
+use crate::client::{Route, ClientCommand, Sender};
 use log::error;
 use shv::metamethod::{Access, Flag, MetaMethod};
-use shv::{RpcMessageMetaTags, RpcValue};
+use shv::{RpcMessageMetaTags, RpcValue, RpcMessage};
 
 const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
 const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
@@ -57,11 +57,10 @@ const APP_NODE: AppNode = AppNode {
     shv_version_minor: 0,
 };
 
-fn app_node_process_request(req_data: RequestData, client_cmd_tx: Sender<ClientCommand>) {
-    let rq = &req_data.request;
-    if rq.shv_path().unwrap_or_default().is_empty() {
-        let mut resp = rq.prepare_response().unwrap_or_default();
-        let resp_value = match rq.method() {
+async fn app_node_process_request(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
+    if request.shv_path().unwrap_or_default().is_empty() {
+        let mut resp = request.prepare_response().unwrap_or_default();
+        let resp_value = match request.method() {
             Some(METH_SHV_VERSION_MAJOR) => Some(APP_NODE.shv_version_major.into()),
             Some(METH_SHV_VERSION_MINOR) => Some(APP_NODE.shv_version_minor.into()),
             Some(METH_NAME) => Some(RpcValue::from(APP_NODE.app_name)),
@@ -70,11 +69,7 @@ fn app_node_process_request(req_data: RequestData, client_cmd_tx: Sender<ClientC
         };
         if let Some(val) = resp_value {
             resp.set_result(val);
-            if let Err(e) = client_cmd_tx
-                // .send(DeviceCommand::SendMessage { message: resp })
-                // .await
-                .unbounded_send(ClientCommand::SendMessage { message: resp })
-            {
+            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
                 error!("app_node_process_request: Cannot send response ({e})");
             }
         }
@@ -133,14 +128,10 @@ const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
     serial_number: None,
 };
 
-fn app_device_node_process_request(
-    req_data: RequestData,
-    client_cmd_tx: Sender<ClientCommand>,
-) {
-    let rq = &req_data.request;
-    if rq.shv_path().unwrap_or_default().is_empty() {
-        let mut resp = rq.prepare_response().unwrap_or_default();
-        let resp_value = match rq.method() {
+async fn app_device_node_process_request(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
+    if request.shv_path().unwrap_or_default().is_empty() {
+        let mut resp = request.prepare_response().unwrap_or_default();
+        let resp_value = match request.method() {
             Some(METH_NAME) => Some(RpcValue::from(APP_DEVICE_NODE.device_name)),
             Some(METH_VERSION) => Some(RpcValue::from(APP_DEVICE_NODE.version)),
             Some(METH_SERIAL_NUMBER) => match &APP_DEVICE_NODE.serial_number {
@@ -151,18 +142,14 @@ fn app_device_node_process_request(
         };
         if let Some(val) = resp_value {
             resp.set_result(val);
-            if let Err(e) = client_cmd_tx
-                // .send(DeviceCommand::SendMessage { message: resp })
-                // .await
-                .unbounded_send(ClientCommand::SendMessage { message: resp })
-            {
+            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
                 error!("app_device_node_process_request: Cannot send response ({e})");
             }
         }
     }
 }
 
-pub fn app_device_node_routes<S>() -> Vec<Route<S>> {
+pub fn app_device_node_routes<T>() -> Vec<Route<T>> {
     [Route::new(
         [METH_NAME, METH_VERSION, METH_SERIAL_NUMBER],
         crate::handler_stateless!(app_device_node_process_request),

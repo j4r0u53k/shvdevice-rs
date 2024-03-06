@@ -1,8 +1,7 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode, check_request_access, RequestAccessResult};
+use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode};
 use async_broadcast::RecvError;
-use futures::channel::oneshot;
-use futures::stream::FuturesUnordered;
+use futures::future::BoxFuture;
 use futures::{select, FutureExt, StreamExt};
 use log::*;
 use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
@@ -13,20 +12,12 @@ use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::{make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub type Sender<K> = futures::channel::mpsc::UnboundedSender<K>;
 pub type Receiver<K> = futures::channel::mpsc::UnboundedReceiver<K>;
 
 type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
-
-type OneshotSender<T> = futures::channel::oneshot::Sender<T>;
-type OneshotReceiver<T> = futures::channel::oneshot::Receiver<T>;
-
-#[derive(Clone)]
-pub struct RequestData {
-    pub mount_path: String,
-    pub request: RpcMessage,
-}
 
 pub enum ClientCommand {
     SendMessage {
@@ -53,36 +44,30 @@ pub enum RequestResult {
     Error(RpcError),
 }
 
-// pub type HandlerFn<S> = Box<
-//     dyn for<'a> Fn(RequestData, Sender<ClientCommand>, &'a mut Option<S>) -> BoxFuture<'_, ()>,
-// >;
+pub type MethodsGetter<T> = Box<dyn for<'a> Fn(&'a str, Option<Arc<T>>) -> BoxFuture<'a, Vec<&'static MetaMethod>> + Sync + Send>;
+pub type RequestHandler<T> = Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<Arc<T>>) -> BoxFuture<'static, ()> + Sync + Send>;
 
-pub type RequestHandler<S> = Box<dyn Fn(RequestData, Sender<ClientCommand>, &mut Option<S>)>;
-pub type MethodsGetter<S> = Box<dyn Fn(&str, OneshotSender<Vec<&MetaMethod>>, &mut Option<S>)>;
-
-pub struct Route<S> {
-    pub handler: RequestHandler<S>,
+pub struct Route<T> {
+    pub handler: RequestHandler<T>,
     pub methods: Vec<String>,
 }
 
 #[macro_export]
 macro_rules! handler {
     ($func:ident) => {
-        // Box::new(move |r, s, t| Box::pin($func(r, s, t)))
-        Box::new(move |r, s, t| $func(r, s, t))
+        Box::new(move |req, tx, data| Box::pin($func(req, tx, data)))
     };
 }
 
 #[macro_export]
 macro_rules! handler_stateless {
     ($func:ident) => {
-        // Box::new(move |r, s, _t| Box::pin($func(r, s)))
-        Box::new(move |r, s, _t| $func(r, s))
+        Box::new(move |req, tx, _data| Box::pin($func(req, tx)))
     };
 }
 
-impl<S> Route<S> {
-    pub fn new<I>(methods: I, handler: RequestHandler<S>) -> Self
+impl<T> Route<T> {
+    pub fn new<I>(methods: I, handler: RequestHandler<T>) -> Self
     where
         I: IntoIterator,
         I::Item: Into<String>,
@@ -121,14 +106,12 @@ impl ClientEventsReceiver {
     }
 }
 
-pub struct Client<S> {
-    mounts: BTreeMap<String, ShvNode<'static, S>>,
-    app_data: Option<S>,
+pub struct Client<T> {
+    mounts: BTreeMap<String, ShvNode<'static, T>>,
+    app_data: Option<Arc<T>>,
 }
 
-type UnresolvedReqOutput = (RequestData, Result<Vec<&'static MetaMethod>, oneshot::Canceled>);
-
-impl<S> Client<S> {
+impl<T: Send + Sync + 'static> Client<T> {
     pub fn new() -> Self {
         Self {
             mounts: Default::default(),
@@ -140,7 +123,7 @@ impl<S> Client<S> {
     where
         P: AsRef<str>,
         M: IntoIterator<Item = &'static MetaMethod>,
-        R: Into<Vec<Route<S>>>,
+        R: IntoIterator<Item = Route<T>>,
     {
         let path = path.as_ref();
         let node = ShvNode::new_static(defined_methods, routes);
@@ -148,14 +131,14 @@ impl<S> Client<S> {
         self
     }
 
-    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<S>, request_handler: RequestHandler<S>) -> &mut Self {
+    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> &mut Self {
         let path = path.as_ref();
         let node = ShvNode::new_dynamic(methods_getter, request_handler);
         self.mounts.insert(path.into(), node);
         self
     }
 
-    pub fn with_app_data(&mut self, app_data: S) -> &mut Self {
+    pub fn with_app_data(&mut self, app_data: Arc<T>) -> &mut Self {
         self.app_data = Some(app_data);
         self
     }
@@ -198,10 +181,8 @@ impl<S> Client<S> {
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
-        let mut unresolved_requests = FuturesUnordered::new();
 
-        let (client_cmd_tx, mut client_cmd_rx) =
-                futures::channel::mpsc::unbounded();
+        let (client_cmd_tx, mut client_cmd_rx) = futures::channel::mpsc::unbounded();
         let (mut client_events_tx, client_events_rx) = async_broadcast::broadcast(10);
         client_events_tx.set_overflow(true);
         let client_events_receiver = ClientEventsReceiver(client_events_rx.clone());
@@ -213,6 +194,7 @@ impl<S> Client<S> {
 
         loop {
             select! {
+                // TODO: try to make client_cmd_rx.next().fuse() future before the loop
                 client_cmd_result = client_cmd_rx.next().fuse() => match client_cmd_result {
                     Some(client_cmd) => {
                         use ClientCommand::*;
@@ -257,18 +239,12 @@ impl<S> Client<S> {
                 },
                 conn_event_result = conn_events_rx.next().fuse() => match conn_event_result {
                     Some(conn_event) => {
-                        // Ok(conn_event) => {
                         use ConnectionEvent::*;
                         match conn_event {
                             RpcFrameReceived(frame) => {
-                                if let Some((rq_data, methods_res_rx)) = self.process_rpc_frame(
-                                    frame,
-                                    &client_cmd_tx,
-                                    &mut pending_rpc_calls,
-                                    &mut subscriptions)
-                                    .expect("Cannot process RPC frame") {
-                                        unresolved_requests.push(Self::mk_unresolved_rq(rq_data, methods_res_rx));
-                                    }
+                                self.process_rpc_frame(frame, &client_cmd_tx, &mut pending_rpc_calls, &mut subscriptions)
+                                    .await
+                                    .expect("Cannot process RPC frame");
                             },
                             Connected(sender) => {
                                 conn_cmd_sender = Some(sender);
@@ -291,100 +267,35 @@ impl<S> Client<S> {
                         return Ok(());
                     }
                 },
-                (req_data, methods_result) = unresolved_requests.select_next_some() => {
-                    self.resolve_request(methods_result, req_data, &client_cmd_tx)?;
-                }
             }
         }
     }
 
-    async fn mk_unresolved_rq(rq_data: RequestData, methods_res_rx: OneshotReceiver<Vec<&'static MetaMethod>>)
-        -> UnresolvedReqOutput {
-            (rq_data, methods_res_rx.await)
-    }
-
-    fn resolve_request(
-        &mut self,
-        methods_result: Result<Vec<&MetaMethod>, oneshot::Canceled>,
-        request_data: RequestData,
-        client_cmd_tx: &Sender<ClientCommand>) -> shv::Result<()>
-    {
-        match methods_result {
-            Ok(methods) => { // Resolved
-                match check_request_access(&request_data.request, methods) {
-                    RequestAccessResult::Ok => {
-                        let node = self.mounts.get(&request_data.mount_path)
-                            .expect(&format!("node on path `{}` should exist", &request_data.mount_path));
-                        node.process_request(request_data, client_cmd_tx.clone(), &mut self.app_data);
-                    },
-                    RequestAccessResult::Err(err) => {
-                        let mut resp = request_data.request.prepare_response()
-                            .expect("should be able to prepare response");
-                        warn!("Check request access on path: {}/{}, error: {}",
-                              &request_data.request.shv_path().unwrap_or_default(),
-                              &request_data.mount_path,
-                              err);
-                        resp.set_error(err);
-                        client_cmd_tx
-                            .unbounded_send(ClientCommand::SendMessage { message: resp })?;
-                    }
-                }
-            },
-            Err(_) => { // methods_result tx closed before returning the result
-                let mut resp = request_data.request.prepare_response()
-                    .expect("should be able to prepare response");
-                resp.set_error(RpcError::new(
-                        RpcErrorCode::MethodCallCancelled,
-                        &format!("Could not find any methods on shv path {}/{}",
-                              &request_data.request.shv_path().unwrap_or_default(),
-                              &request_data.mount_path),
-                        ));
-                client_cmd_tx
-                    .unbounded_send(ClientCommand::SendMessage { message: resp })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn process_rpc_frame(
-        &mut self,
+    async fn process_rpc_frame(
+        &self,
         frame: RpcFrame,
         client_cmd_tx: &Sender<ClientCommand>,
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
         subscriptions: &mut HashMap<String, Sender<RpcFrame>>,
-    ) -> shv::Result<Option<(RequestData, OneshotReceiver<Vec<&'static MetaMethod>>)>> {
+    ) -> shv::Result<()> {
         if frame.is_request() {
-            if let Ok(mut rpcmsg) = frame.to_rpcmesage() {
-                if let Ok(mut resp) = rpcmsg.prepare_response() {
+            if let Ok(mut request_msg) = frame.to_rpcmesage() {
+                if let Ok(mut resp) = request_msg.prepare_response() {
                     let shv_path = frame.shv_path().unwrap_or_default();
                     let local_result = process_local_dir_ls(&self.mounts, &frame);
                     match local_result {
                         None => {
-                            if let Some((mount, path)) =
-                                find_longest_prefix(&self.mounts, &shv_path)
-                            {
-                                rpcmsg.set_shvpath(path);
-                                let request_data = RequestData {
-                                    mount_path: mount.into(),
-                                    request: rpcmsg,
-                                };
-                                let node = self.mounts.get(mount).unwrap();
-                                let mut methods_res_rx = node.methods(path, &mut self.app_data);
-                                let methods_res = methods_res_rx.try_recv();
-                                if let Ok(None) = methods_res {
-                                    // Unresolved, will be resolved asynchronously
-                                    return Ok(Some((request_data, methods_res_rx)));
-                                }
-                                let methods_res = methods_res.and_then(|opt| Ok(opt.expect("should be Some")));
-                                self.resolve_request(methods_res, request_data, client_cmd_tx)?;
+                            if let Some((mount, path)) = find_longest_prefix(&self.mounts, &shv_path) {
+                                request_msg.set_shvpath(path);
+                                let node = self.mounts.get(mount).unwrap_or_else(|| panic!("A node on path '{mount}' should exist"));
+                                node.process_request(request_msg, mount.to_owned(), client_cmd_tx.clone(), &self.app_data).await;
                             } else {
                                 let method = frame.method().unwrap_or_default();
                                 resp.set_error(RpcError::new(
                                     RpcErrorCode::MethodNotFound,
-                                    &format!("Invalid shv path {}:{}()", shv_path, method),
+                                    &format!("Invalid shv path {shv_path}:{method}()"),
                                 ));
-                                client_cmd_tx
-                                    .unbounded_send(ClientCommand::SendMessage { message: resp })?;
+                                client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp })?;
                             }
                         }
                         Some(result) => {
@@ -439,7 +350,7 @@ impl<S> Client<S> {
                 }
             }
         }
-        Ok(None)
+        Ok(())
     }
 }
 
@@ -496,7 +407,7 @@ mod tests {
 
             fn emulate_receive_response(&self, from_request: &RpcMessage, result: impl Into<RpcValue>) {
                 let mut resp = from_request.prepare_response().unwrap();
-                resp.set_result(result);
+                resp.set_result(result.into()); // TODO: patch shv-rs to accept Into<RpcValue>
                 self.conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(resp.to_frame().unwrap())).unwrap();
             }
 
@@ -704,10 +615,11 @@ mod tests {
         };
     }
 
-    generics_def!(TestDriverBounds <C, F> where
+    generics_def!(TestDriverBounds <C, F, S> where
                   C: FnOnce(Sender<ConnectionEvent>, Sender<ClientCommand>, ClientEventsReceiver) -> F,
                   F: Future + Send + 'static,
                   F::Output: Send + 'static,
+                  S: Sync + Send + 'static,
                   );
 
     #[cfg(feature = "tokio")]
@@ -723,7 +635,7 @@ mod tests {
         def_test!(do_not_receive_unsubscribed_notification);
 
         #[generics(TestDriverBounds)]
-        async fn init_client<S>(test_drv: C, custom_client: Option<Client<S>>) {
+        async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
             let mut client = if let Some(client) = custom_client { client } else { Client::<S>::new() };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
@@ -737,7 +649,7 @@ mod tests {
         }
 
         #[generics(TestDriverBounds)]
-        pub fn run_test<S>(test_drv: C, custom_client: Option<Client<S>>) {
+        pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
             ::tokio::runtime::Builder::new_multi_thread()
                 .build()
                 .unwrap()
@@ -758,7 +670,7 @@ mod tests {
         def_test!(do_not_receive_unsubscribed_notification);
 
         #[generics(TestDriverBounds)]
-        async fn init_client<S>(test_drv: C, custom_client: Option<Client<S>>) {
+        async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
             let mut client = if let Some(client) = custom_client { client } else { Client::<S>::new() };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
@@ -772,7 +684,7 @@ mod tests {
         }
 
         #[generics(TestDriverBounds)]
-        pub fn run_test<S>(test_drv: C, custom_client: Option<Client<S>>) {
+        pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
             ::async_std::task::block_on(init_client(test_drv, custom_client));
         }
     }
