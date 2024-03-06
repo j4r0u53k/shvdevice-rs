@@ -178,55 +178,56 @@ where
     info!("Heartbeat interval set to: {:?}", heartbeat_interval);
     client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
 
-    let mut fut_heartbeat_timeout = Box::pin(futures_time::task::sleep(heartbeat_interval.into())).fuse();
-
-    // let (conn_cmd_sender, mut conn_cmd_receiver) = tokio::sync::mpsc::channel::<ConnectionCommand>(32);
-    // let (conn_cmd_sender, mut conn_cmd_receiver) = async_std::channel::unbounded();
     let (conn_cmd_sender, mut conn_cmd_receiver) = futures::channel::mpsc::unbounded();
-    // conn_event_sender.send(ConnectionEvent::Connected(conn_cmd_sender.clone())).await?;
     conn_event_sender.unbounded_send(ConnectionEvent::Connected(conn_cmd_sender.clone()))?;
 
     let res: shv::Result<()> = async move {
+        let mut fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
+        let mut next_conn_cmd = conn_cmd_receiver.next().fuse();
+        let mut fut_receive_frame = frame_reader.receive_frame().fuse();
+
         loop {
-            let fut_receive_frame = frame_reader.receive_frame();
             select! {
                 _ = fut_heartbeat_timeout => {
                     // send heartbeat
                     let message = RpcMessage::new_request(".app", METH_PING, None);
-                    // conn_cmd_sender.send(ConnectionCommand::SendMessage(message)).await?;
                     conn_cmd_sender.unbounded_send(ConnectionCommand::SendMessage(message))?;
                 },
-                // conn_cmd_result = conn_cmd_receiver.recv().fuse() => match conn_cmd_result {
-                conn_cmd_result = conn_cmd_receiver.next().fuse() => match conn_cmd_result {
-                    Some(connection_command) => {
-                    // Ok(connection_command) => {
-                        match connection_command {
-                            ConnectionCommand::SendMessage(message) => {
-                                // reset heartbeat timer
-                                fut_heartbeat_timeout = Box::pin(futures_time::task::sleep(heartbeat_interval.into())).fuse();
-                                frame_writer.send_message(message).await?;
-                            },
+                conn_cmd_result = next_conn_cmd => {
+                    match conn_cmd_result {
+                        Some(connection_command) => {
+                            match connection_command {
+                                ConnectionCommand::SendMessage(message) => {
+                                    // reset heartbeat timer
+                                    fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
+                                    frame_writer.send_message(message).await?;
+                                },
+                            }
+                        },
+                        None => {
+                            error!("Couldn't get ConnectionCommand from the channel");
+                        },
+                    }
+                    next_conn_cmd = conn_cmd_receiver.next().fuse();
+                }
+                receive_frame_result = fut_receive_frame => {
+                    match receive_frame_result {
+                        Ok(frame) => {
+                            conn_event_sender.unbounded_send(ConnectionEvent::RpcFrameReceived(frame))?;
                         }
-                    },
-                    None => {
-                    // Err(_) => {
-                        // return Err(format!("Couldn't get ConnectionCommand from the channel: {err}").into());
-                        error!("Couldn't get ConnectionCommand from the channel");
-                    },
-                },
-                receive_frame_result = fut_receive_frame.fuse() => match receive_frame_result {
-                    Ok(frame) => {
-                        // conn_event_sender.send(ConnectionEvent::RpcFrameReceived(frame)).await?;
-                        conn_event_sender.unbounded_send(ConnectionEvent::RpcFrameReceived(frame))?;
+                        Err(e) => {
+                            return Err(format!("Receive frame error - {e}").into());
+                        }
                     }
-                    Err(e) => {
-                        return Err(format!("Receive frame error - {e}").into());
-                    }
+                    // The drop before the reassignment is needed because the future is holding
+                    // &mut frame_reader until it is dropped, therefore it cannot be borrowed
+                    // again on the rhs of the assignment.
+                    drop(fut_receive_frame);
+                    fut_receive_frame = frame_reader.receive_frame().fuse();
                 }
             }
         }
     }.await;
-    // conn_event_sender.send(ConnectionEvent::Disconnected).await?;
     conn_event_sender.unbounded_send(ConnectionEvent::Disconnected)?;
     res
 }

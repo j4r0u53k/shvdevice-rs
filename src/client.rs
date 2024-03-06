@@ -192,10 +192,12 @@ impl<T: Send + Sync + 'static> Client<T> {
             init_handler(client_cmd_tx.clone(), client_events_receiver);
         }
 
+        let mut next_client_cmd = client_cmd_rx.next().fuse();
+        let mut next_conn_event = conn_events_rx.next().fuse();
+
         loop {
             select! {
-                // TODO: try to make client_cmd_rx.next().fuse() future before the loop
-                client_cmd_result = client_cmd_rx.next().fuse() => match client_cmd_result {
+                client_cmd_result = next_client_cmd => match client_cmd_result {
                     Some(client_cmd) => {
                         use ClientCommand::*;
                         match client_cmd {
@@ -232,12 +234,13 @@ impl<T: Send + Sync + 'static> Client<T> {
                                     .expect("Cannot send subscription request through ClientCommand channel");
                             },
                         }
+                        next_client_cmd = client_cmd_rx.next().fuse();
                     },
                     None => {
                         panic!("Couldn't get ClientCommand from the channel");
                     },
                 },
-                conn_event_result = conn_events_rx.next().fuse() => match conn_event_result {
+                conn_event_result = next_conn_event => match conn_event_result {
                     Some(conn_event) => {
                         use ConnectionEvent::*;
                         match conn_event {
@@ -261,6 +264,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                 }
                             },
                         }
+                        next_conn_event = conn_events_rx.next().fuse();
                     }
                     None => {
                         warn!("Connection task terminated, exiting");
