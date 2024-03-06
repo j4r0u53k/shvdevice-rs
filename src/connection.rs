@@ -119,7 +119,7 @@ where
                     }
                 }
                 Err(err) => {
-                    return Err(err.into());
+                    Err(err.into())
                 }
             }
         } else {
@@ -168,8 +168,8 @@ where
     let login_params = LoginParams {
         user,
         password,
-        mount_point: (&config.mount.clone().unwrap_or_default()).to_owned(),
-        device_id: (&config.device_id.clone().unwrap_or_default()).to_owned(),
+        mount_point: config.mount.clone().unwrap_or_default().to_owned(),
+        device_id: config.device_id.clone().unwrap_or_default().to_owned(),
         heartbeat_interval,
         ..Default::default()
     };

@@ -223,7 +223,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                     .expect("Cannot send subscription request through ClientCommand channel");
                             },
                             Unsubscribe{path} => {
-                                if let None = subscriptions.remove(&path) {
+                                if subscriptions.remove(&path).is_none() {
                                     warn!("No subscription found for path `{}`", &path);
                                 }
                                 let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
@@ -285,7 +285,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                     let local_result = process_local_dir_ls(&self.mounts, &frame);
                     match local_result {
                         None => {
-                            if let Some((mount, path)) = find_longest_prefix(&self.mounts, &shv_path) {
+                            if let Some((mount, path)) = find_longest_prefix(&self.mounts, shv_path) {
                                 request_msg.set_shvpath(path);
                                 let node = self.mounts.get(mount).unwrap_or_else(|| panic!("A node on path '{mount}' should exist"));
                                 node.process_request(request_msg, mount.to_owned(), client_cmd_tx.clone(), &self.app_data).await;
@@ -293,7 +293,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                 let method = frame.method().unwrap_or_default();
                                 resp.set_error(RpcError::new(
                                     RpcErrorCode::MethodNotFound,
-                                    &format!("Invalid shv path {shv_path}:{method}()"),
+                                    format!("Invalid shv path {shv_path}:{method}()"),
                                 ));
                                 client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp })?;
                             }
@@ -324,7 +324,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         } else if frame.is_response() {
             if let Some(req_id) = frame.request_id() {
                 if let Some(response_sender) = pending_rpc_calls.remove(&req_id) {
-                    if let Err(_) = response_sender.unbounded_send(frame.clone()) {
+                    if response_sender.unbounded_send(frame.clone()).is_err() {
                         warn!(
                             "Response channel closed before received response: {}",
                             &frame
@@ -334,18 +334,17 @@ impl<T: Send + Sync + 'static> Client<T> {
             }
         } else if frame.is_signal() {
             if let Some(path) = frame.shv_path() {
-                if let Some((subscribed_path, _)) = find_longest_prefix(subscriptions, &path) {
+                if let Some((subscribed_path, _)) = find_longest_prefix(subscriptions, path) {
                     let notifications_sender = subscriptions.get(subscribed_path).unwrap();
                     let subscribed_path = subscribed_path.to_owned();
-                    if let Err(_) = notifications_sender.unbounded_send(frame) {
+                    if notifications_sender.unbounded_send(frame).is_err() {
                         warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
                         subscriptions.remove(&subscribed_path);
                         let request = create_subscription_request(
                             &subscribed_path,
                             SubscriptionRequest::Unsubscribe,
                         );
-                        client_cmd_tx
-                            .unbounded_send(ClientCommand::SendMessage { message: request })?;
+                        client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: request })?;
                     }
                 }
             }

@@ -29,12 +29,10 @@ impl From<Option<&RpcValue>> for DirParam {
             Some(rpcval) => {
                 if rpcval.is_string() {
                     DirParam::BriefMethod(rpcval.as_str().into())
+                } else if rpcval.as_bool() {
+                    DirParam::Full
                 } else {
-                    if rpcval.as_bool() {
-                        DirParam::Full
-                    } else {
-                        DirParam::Brief
-                    }
+                    DirParam::Brief
                 }
             }
             None => DirParam::Brief,
@@ -54,7 +52,7 @@ fn dir<'a>(methods: impl Iterator<Item = &'a MetaMethod>, param: DirParam) -> Rp
                 lst.push(mm.to_rpcvalue(metamethod::DirFormat::Map));
             }
             DirParam::BriefMethod(ref method_name) => {
-                if &mm.name == method_name {
+                if mm.name == method_name {
                     result = mm.to_rpcvalue(metamethod::DirFormat::IMap);
                     break;
                 }
@@ -96,13 +94,13 @@ pub fn process_local_dir_ls<V>(
         return None;
     }
     let shv_path = frame.shv_path().unwrap_or_default();
-    let mut children_on_path = children_on_path(&mounts, shv_path);
+    let mut children_on_path = children_on_path(mounts, shv_path);
     if let Some(children_on_path) = children_on_path.as_mut() {
         if frame.meta.get(DOT_LOCAL_HACK).is_some() {
             children_on_path.insert(0, DOT_LOCAL_DIR.into());
         }
     }
-    let mount = find_longest_prefix(mounts, &shv_path);
+    let mount = find_longest_prefix(mounts, shv_path);
     let is_mount_point = mount.is_some();
     let is_leaf = match &children_on_path {
         None => is_mount_point,
@@ -112,7 +110,7 @@ pub fn process_local_dir_ls<V>(
         // path doesn't exist
         return Some(RequestResult::Error(RpcError::new(
             RpcErrorCode::MethodNotFound,
-            &format!("Invalid shv path: {}", shv_path),
+            format!("Invalid shv path: {}", shv_path),
         )));
     }
     if method == METH_DIR && !is_mount_point {
@@ -123,7 +121,7 @@ pub fn process_local_dir_ls<V>(
         } else {
             return Some(RequestResult::Error(RpcError::new(
                 RpcErrorCode::InvalidRequest,
-                &format!("Cannot convert RPC frame to Rpc message"),
+                "Cannot convert RPC frame to RPC message".to_string(),
             )));
         }
     }
@@ -135,7 +133,7 @@ pub fn process_local_dir_ls<V>(
         } else {
             return Some(RequestResult::Error(RpcError::new(
                 RpcErrorCode::InvalidRequest,
-                &format!("Cannot convert RPC frame to Rpc message"),
+                "Cannot convert RPC frame to RPC message".to_string(),
             )));
         }
     }
@@ -149,7 +147,7 @@ fn ls_children_to_result(children: Option<Vec<String>>, param: LsParam) -> Reque
                 "Invalid shv path",
             )),
             Some(dirs) => {
-                let res: rpcvalue::List = dirs.iter().map(|d| RpcValue::from(d)).collect();
+                let res: rpcvalue::List = dirs.iter().map(RpcValue::from).collect();
                 RequestResult::Response(res.into())
             }
         },
@@ -163,21 +161,16 @@ pub fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<V
     let mut dirs: Vec<String> = Vec::new();
     let mut unique_dirs: HashSet<String> = HashSet::new();
     let mut dir_exists = false;
-    for (key, _) in mounts.range(path.to_string()..) {
+    for (key, _) in mounts.range(path.to_owned()..) {
         if key.starts_with(path) {
             dir_exists = true;
-            if path.is_empty()
-                || key.len() == path.len()
-                || key.as_bytes()[path.len()] == ('/' as u8)
-            {
-                if key.len() > path.len() {
-                    let dir_rest_start = if path.is_empty() { 0 } else { path.len() + 1 };
-                    let mut updirs = key[dir_rest_start..].split('/');
-                    if let Some(dir) = updirs.next() {
-                        if !unique_dirs.contains(dir) {
-                            dirs.push(dir.to_string());
-                            unique_dirs.insert(dir.to_string());
-                        }
+            if path.is_empty() || (key.len() > path.len() && key.as_bytes()[path.len()] == (b'/')) {
+                let dir_rest_start = if path.is_empty() { 0 } else { path.len() + 1 };
+                let mut updirs = key[dir_rest_start..].split('/');
+                if let Some(dir) = updirs.next() {
+                    if !unique_dirs.contains(dir) {
+                        dirs.push(dir.to_string());
+                        unique_dirs.insert(dir.to_string());
                     }
                 }
             }
@@ -243,29 +236,29 @@ mod tests {
 
 /// Helper trait for uniform access to some common methods of BTreeMap<String, V> and HashMap<String, V>
 pub trait StringMapView<V> {
-    fn contains_key_(&self, key: &String) -> bool;
+    fn contains_key_(&self, key: &str) -> bool;
 }
 
 impl<V> StringMapView<V> for BTreeMap<String, V> {
-    fn contains_key_(&self, key: &String) -> bool {
+    fn contains_key_(&self, key: &str) -> bool {
         self.contains_key(key)
     }
 }
 
 impl<V> StringMapView<V> for HashMap<String, V> {
-    fn contains_key_(&self, key: &String) -> bool {
+    fn contains_key_(&self, key: &str) -> bool {
         self.contains_key(key)
     }
 }
 
-pub fn find_longest_prefix<'a, 'b, V>(
-    map: &'a impl StringMapView<V>,
-    shv_path: &'b str,
-) -> Option<(&'b str, &'b str)> {
-    let mut path = &shv_path[..];
+pub fn find_longest_prefix<'a, V>(
+    map: &impl StringMapView<V>,
+    shv_path: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    let mut path = shv_path;
     let mut rest = "";
     loop {
-        if map.contains_key_(&path.to_string()) {
+        if map.contains_key_(path) {
             return Some((path, rest));
         }
         if path.is_empty() {

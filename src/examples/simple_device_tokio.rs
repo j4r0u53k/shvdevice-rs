@@ -50,7 +50,7 @@ fn init_logger(cli_opts: &Opts) {
     let mut logger = SimpleLogger::new();
     logger = logger.with_level(LevelFilter::Info);
     if let Some(module_names) = &cli_opts.verbose {
-        for (module, level) in parse_log_verbosity(&module_names, module_path!()) {
+        for (module, level) in parse_log_verbosity(module_names, module_path!()) {
             logger = logger.with_module_level(module, level);
         }
     }
