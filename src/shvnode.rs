@@ -184,55 +184,6 @@ pub fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<V
         None
     }
 }
-#[cfg(test)]
-mod tests {
-    use crate::handler;
-
-    use super::*;
-
-    #[test]
-    fn ls_mounts() {
-        let mut mounts = BTreeMap::new();
-        mounts.insert("a".into(), ());
-        mounts.insert("a/1".into(), ());
-        mounts.insert("b/2/C".into(), ());
-        mounts.insert("b/2/D".into(), ());
-        mounts.insert("b/3/E".into(), ());
-        assert_eq!(
-            super::children_on_path(&mounts, ""),
-            Some(vec!["a".to_string(), "b".to_string()])
-        );
-        assert_eq!(
-            super::children_on_path(&mounts, "a"),
-            Some(vec!["1".to_string()])
-        );
-        assert_eq!(
-            super::children_on_path(&mounts, "b/2"),
-            Some(vec!["C".to_string(), "D".to_string()])
-        );
-    }
-
-    async fn dummy_handler(_: RpcMessage, _: Sender<ClientCommand>, _: Option<Arc<()>>) {}
-
-    #[test]
-    fn accept_valid_routes() {
-        ShvNode::new_static(&PROPERTY_METHODS,
-                            vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
-        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn reject_sig_chng_route() {
-        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([SIG_CHNG], handler!(dummy_handler))]);
-    }
-
-    #[test]
-    #[should_panic]
-    fn reject_invalid_method_route() {
-        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
-    }
-}
 
 /// Helper trait for uniform access to some common methods of BTreeMap<String, V> and HashMap<String, V>
 pub trait StringMapView<V> {
@@ -443,8 +394,6 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
     }
 }
 
-type RequestAccessResult = Result<(), RpcError>;
-
 fn resolve_request_access<'a>(request: &RpcMessage, mount_path: &String, client_cmd_tx: &Sender<ClientCommand>, methods: impl IntoIterator<Item = &'a MetaMethod>) -> bool {
     if let Err(err) = check_request_access(request, methods) {
         let mut resp = request.prepare_response()
@@ -459,6 +408,8 @@ fn resolve_request_access<'a>(request: &RpcMessage, mount_path: &String, client_
     }
     true
 }
+
+type RequestAccessResult = Result<(), RpcError>;
 
 fn check_request_access<'a>(rq: &RpcMessage, methods: impl IntoIterator<Item = &'a MetaMethod>) -> RequestAccessResult {
     let level_str = rq.access().unwrap_or_default();
@@ -550,3 +501,53 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
         description: "",
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use crate::handler;
+
+    use super::*;
+
+    #[test]
+    fn ls_mounts() {
+        let mut mounts = BTreeMap::new();
+        mounts.insert("a".into(), ());
+        mounts.insert("a/1".into(), ());
+        mounts.insert("b/2/C".into(), ());
+        mounts.insert("b/2/D".into(), ());
+        mounts.insert("b/3/E".into(), ());
+        assert_eq!(
+            super::children_on_path(&mounts, ""),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            super::children_on_path(&mounts, "a"),
+            Some(vec!["1".to_string()])
+        );
+        assert_eq!(
+            super::children_on_path(&mounts, "b/2"),
+            Some(vec!["C".to_string(), "D".to_string()])
+        );
+    }
+
+    async fn dummy_handler(_: RpcMessage, _: Sender<ClientCommand>, _: Option<Arc<()>>) {}
+
+    #[test]
+    fn accept_valid_routes() {
+        ShvNode::new_static(&PROPERTY_METHODS,
+                            vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn reject_sig_chng_route() {
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([SIG_CHNG], handler!(dummy_handler))]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn reject_invalid_method_route() {
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
+    }
+}

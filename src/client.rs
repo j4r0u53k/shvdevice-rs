@@ -112,6 +112,8 @@ pub struct Client<T> {
 }
 
 impl<T: Send + Sync + 'static> Client<T> {
+#[allow(clippy::new_without_default)]
+    // FIXME: Provide a constructor for plain client, device and so on
     pub fn new() -> Self {
         Self {
             mounts: Default::default(),
@@ -392,7 +394,7 @@ mod tests {
 
         impl Drop for ConnectionMock {
             fn drop(&mut self) {
-                if let Err(_) = self.conn_evt_tx.unbounded_send(ConnectionEvent::Disconnected) {
+                if self.conn_evt_tx.unbounded_send(ConnectionEvent::Disconnected).is_err() {
                     error!("Disconnected event send error");
                 }
             }
