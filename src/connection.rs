@@ -38,14 +38,8 @@ mod tokio {
     async fn connect(
         address: String,
     ) -> shv::Result<(Compat<BufReader<OwnedReadHalf>>, Compat<OwnedWriteHalf>)>
-// async fn connect(address: String) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)>
     {
-        // let stream = TcpStream::connect(&address.parse()?).await?;
-        // let (reader, writer) = stream.split();
-        // let reader = BufReader::new(reader);
-        // Ok((reader, writer))
-
-        let stream = TcpStream::connect(&address).await?;
+        let stream = TcpStream::connect(address).await?;
         let (reader, writer) = stream.into_split();
         let writer = writer.compat_write();
         let reader = BufReader::new(reader).compat();
@@ -58,7 +52,7 @@ mod async_std {
     use super::{connection_task, ClientConfig, ConnectionEvent, Sender};
     use futures::io::{BufReader, ReadHalf, WriteHalf};
     use futures::AsyncReadExt;
-    use futures_net::TcpStream;
+    use async_std::net::TcpStream;
 
     pub(super) fn spawn_connection_task(
         config: &ClientConfig,
@@ -70,7 +64,7 @@ mod async_std {
     async fn connect(
         address: String,
     ) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)> {
-        let stream = TcpStream::connect(&address.parse()?).await?;
+        let stream = TcpStream::connect(address).await?;
         let (reader, writer) = stream.split();
         let reader = BufReader::new(reader);
         Ok((reader, writer))
