@@ -18,7 +18,9 @@ path = "src/examples/simple_device_async_std.rs"
 required-features = ["async_std"]
 
 [dependencies]
-shv = { git = "https://github.com/j4r0u53k/shv-rs.git", branch = "use-into-target-in-interfaces" }
+# shv = { git = "https://github.com/silicon-heaven/shv-rs.git", branch = "master" }
+shv = { git = "https://github.com/j4r0u53k/shv-rs.git", branch = "fix-heartbeat-to-parent-broker" }
+# shv = { path = "../shv-rs" }
 futures = "0.3.29"
 async-std = { version = "1.12.0", features = ["attributes"], optional = true }
 url = "2.4.1"

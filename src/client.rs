@@ -4,7 +4,6 @@ use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, FutureExt, StreamExt};
 use log::*;
-use shv::broker::node::{METH_SUBSCRIBE, METH_UNSUBSCRIBE};
 use shv::client::ClientConfig;
 use shv::metamethod::MetaMethod;
 use shv::rpcframe::RpcFrame;
@@ -13,6 +12,9 @@ use shv::{make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
+
+const METH_SUBSCRIBE: &str = "subscribe";
+const METH_UNSUBSCRIBE: &str = "unsubscribe";
 
 pub type Sender<K> = futures::channel::mpsc::UnboundedSender<K>;
 pub type Receiver<K> = futures::channel::mpsc::UnboundedReceiver<K>;
