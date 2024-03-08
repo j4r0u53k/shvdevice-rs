@@ -244,17 +244,31 @@ impl<'a, T> StaticNode<'a, T> {
     }
 
     fn add_routes(methods: &[&'a MetaMethod], routes: impl IntoIterator<Item = Route<T>>) -> StaticNodeHandlers<T> {
+        if let Some(dup_method) = methods.iter().enumerate().find_map(|(i,mm)| methods[i+1..].iter().find(|m| m.name == mm.name)) {
+            panic!("Duplicate method '{}' in a static node definition", dup_method.name);
+        }
         let mut handlers: StaticNodeHandlers<T> = Default::default();
+        fn is_signal(method: &MetaMethod) -> bool {
+            method.flags & (Flag::IsSignal as u32) != 0u32
+        }
         for route in routes {
             let handler = Rc::new(route.handler);
-            // TODO: check methods duplicities
             for m in &route.methods {
                 methods
                     .iter()
-                    .find(|dm| dm.name == m && (dm.flags & Flag::IsSignal as u32 == 0u32))
+                    .find(|dm| dm.name == m && !is_signal(dm))
                     .expect("Invalid method {m}");
                 handlers.insert(m.clone(), handler.clone());
             }
+        }
+        if let Some(unhandled_method) =
+            methods.iter().find(|mm| {
+                !is_signal(mm) &&
+                ![METH_LS, METH_DIR].contains(&mm.name) &&
+                !handlers.contains_key(mm.name)
+            })
+        {
+            panic!("No handler found for method '{}' of a static node", unhandled_method.name);
         }
         handlers
     }
@@ -303,14 +317,10 @@ impl<'a, T> StaticNode<'a, T> {
                 }
             },
             _ => {
-                // This case means that the method is defined, but the handler is not set.
-                let errmsg = format!(
-                    "Unknown method '{}:{}()', path.",
+                panic!("BUG: Unhandled method '{}:{}()' should have been caught in the node constructor",
                     rq.shv_path().unwrap_or_default(),
                     rq.method().unwrap_or_default()
                 );
-                warn!("{}", &errmsg);
-                RequestResult::Error(RpcError::new(RpcErrorCode::MethodNotFound, &errmsg))
             }
         }
     }
@@ -506,7 +516,6 @@ mod tests {
     fn accept_valid_routes() {
         ShvNode::new_static(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
-        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
     }
 
     #[test]
@@ -519,5 +528,18 @@ mod tests {
     #[should_panic]
     fn reject_invalid_method_route() {
         ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn reject_unhandled_method() {
+        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn reject_duplicate_method() {
+        let duplicate_methods= PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
+        ShvNode::new_static(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
     }
 }
