@@ -289,10 +289,21 @@ impl<'a, T> StaticNode<'a, T> {
     }
 
     fn dir_ls(&self, rq: &RpcMessage) -> RequestResult {
+        let shv_path = rq.shv_path().unwrap_or_default();
+        assert!(shv_path.is_empty(), "shv_path of a request on a static node should be empty after permitted access check");
         match rq.method() {
-            Some(METH_DIR) => self.process_dir(rq),
-            Some(METH_LS) => self.process_ls(rq),
+            Some(METH_DIR) => {
+                let resp = dir(self.methods().iter().copied(), rq.param().into());
+                RequestResult::Response(resp)
+            },
+            Some(METH_LS) => {
+                match LsParam::from(rq.param()) {
+                    LsParam::List => RequestResult::Response(rpcvalue::List::new().into()),
+                    LsParam::Exists(_path) => RequestResult::Response(false.into()),
+                }
+            },
             _ => {
+                // This case means that the method is defined, but the handler is not set.
                 let errmsg = format!(
                     "Unknown method '{}:{}()', path.",
                     rq.shv_path().unwrap_or_default(),
@@ -301,40 +312,6 @@ impl<'a, T> StaticNode<'a, T> {
                 warn!("{}", &errmsg);
                 RequestResult::Error(RpcError::new(RpcErrorCode::MethodNotFound, &errmsg))
             }
-        }
-    }
-
-    fn process_dir(&self, rq: &RpcMessage) -> RequestResult {
-        let shv_path = rq.shv_path().unwrap_or_default();
-        if shv_path.is_empty() {
-            let resp = dir(self.methods().iter().copied(), rq.param().into());
-            RequestResult::Response(resp)
-        } else {
-            let errmsg = format!(
-                "Unknown method '{}:{}()', invalid path.",
-                rq.shv_path().unwrap_or_default(),
-                rq.method().unwrap_or_default()
-            );
-            warn!("{}", &errmsg);
-            RequestResult::Error(RpcError::new(RpcErrorCode::MethodNotFound, &errmsg))
-        }
-    }
-
-    fn process_ls(&self, rq: &RpcMessage) -> RequestResult {
-        let shv_path = rq.shv_path().unwrap_or_default();
-        if shv_path.is_empty() {
-            match LsParam::from(rq.param()) {
-                LsParam::List => RequestResult::Response(rpcvalue::List::new().into()),
-                LsParam::Exists(_path) => RequestResult::Response(false.into()),
-            }
-        } else {
-            let errmsg = format!(
-                "Unknown method '{}:{}()', invalid path.",
-                rq.shv_path().unwrap_or_default(),
-                rq.method().unwrap_or("")
-            );
-            warn!("{}", &errmsg);
-            RequestResult::Error(RpcError::new(RpcErrorCode::MethodNotFound, &errmsg))
         }
     }
 }
@@ -368,7 +345,13 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
     pub async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<Arc<T>>) {
         match &self.0 {
             ShvNodeInner::Static(node) => {
-                let methods = node.methods().iter().copied();
+                let methods = if request.shv_path().unwrap_or_default().is_empty() {
+                    node.methods()
+                } else {
+                    // Static nodes do not have any own children. Any child nodes
+                    // would be resolved in generic function `process_local_dir_ls()`.
+                    &[]
+                }.iter().copied(); // && to &
                 if resolve_request_access(&request, &mount_path, &client_cmd_tx, methods) {
                     node.process_request(request, client_cmd_tx, app_data).await;
                 }
@@ -395,58 +378,45 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
 }
 
 fn resolve_request_access<'a>(request: &RpcMessage, mount_path: &String, client_cmd_tx: &Sender<ClientCommand>, methods: impl IntoIterator<Item = &'a MetaMethod>) -> bool {
-    if let Err(err) = check_request_access(request, methods) {
-        let mut resp = request.prepare_response()
-            .expect("should be able to prepare response");
-        warn!("Check request access on path: {}/{}, error: {}",
-              request.shv_path().unwrap_or_default(),
-              mount_path,
-              err);
-        resp.set_error(err);
-        let _ = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp });
-        return false;
-    }
-    true
-}
 
-type RequestAccessResult = Result<(), RpcError>;
-
-fn check_request_access<'a>(rq: &RpcMessage, methods: impl IntoIterator<Item = &'a MetaMethod>) -> RequestAccessResult {
-    let level_str = rq.access().unwrap_or_default();
-    for level_str in level_str.split(',') {
-        if let Some(rq_level) = Access::from_str(level_str) {
-            let method = rq.method().unwrap_or_default();
-            for mm in methods {
-                if mm.name == method {
-                    return if rq_level >= mm.access {
-                        Ok(())
-                    } else {
-                        Err(
-                            RpcError::new(
-                                RpcErrorCode::PermissionDenied,
-                                format!("Insufficient permissions. Method '{}' called with  access level '{:?}', required '{:?}'",
-                                        method,
-                                        rq_level,
-                                        mm.access)
-                                )
-                            )
-                    }
-                }
-            }
-            return Err(
-                RpcError::new(
-                    RpcErrorCode::MethodNotFound,
-                    format!("Method {method} does not exist on path {}", rq.shv_path().unwrap_or_default())
+    let shv_path = request.shv_path().unwrap_or_default();
+    let check_request_access = || {
+        let method = request.method().unwrap_or_default();
+        let Some(mm) = methods.into_iter().find(|mm| mm.name == method) else {
+            return Err(RpcError::new(RpcErrorCode::MethodNotFound,
+                                     format!("Unknown method on path '{mount_path}/{shv_path}:{method}()'")));
+        };
+        let rq_level_str = request.access().unwrap_or_default();
+        let Some(rq_level) = Access::from_str(rq_level_str) else {
+            return Err(RpcError::new(RpcErrorCode::InvalidRequest, "Undefined access level"));
+        };
+        if rq_level >= mm.access {
+            Ok(())
+        } else {
+            Err(RpcError::new(
+                    RpcErrorCode::PermissionDenied,
+                    format!("Insufficient permissions. \
+                            Method '{mount_path}/{shv_path}:{method}()' \
+                            called with access level '{:?}', required '{:?}'",
+                            rq_level,
+                            mm.access)
                     )
-                );
+               )
         }
-    }
-    Err(
-        RpcError::new(
-            RpcErrorCode::PermissionDenied,
-            "Request with undefined access level".to_string()
-            )
-        )
+    };
+
+    let Err(err) = check_request_access() else {
+        return true;
+    };
+    let mut resp = request.prepare_response()
+        .expect("should be able to prepare response");
+    warn!("Check request access on path: {}/{}, error: {}",
+          mount_path,
+          request.shv_path().unwrap_or_default(),
+          err);
+    resp.set_error(err);
+    let _ = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp });
+    false
 }
 
 
