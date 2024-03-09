@@ -40,7 +40,7 @@ impl From<Option<&RpcValue>> for DirParam {
     }
 }
 
-fn dir<'a>(methods: impl Iterator<Item = &'a MetaMethod>, param: DirParam) -> RpcValue {
+pub fn dir<'a>(methods: impl Iterator<Item = &'a MetaMethod>, param: DirParam) -> RpcValue {
     let mut result = RpcValue::null();
     let mut lst = rpcvalue::List::new();
     for mm in methods {
@@ -459,7 +459,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_GET,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: Access::Read,
         param: "",
         result: "",
         description: "",
@@ -467,7 +467,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_SET,
         flags: Flag::IsSetter as u32,
-        access: Access::Browse,
+        access: Access::Write,
         param: "",
         result: "",
         description: "",
@@ -475,7 +475,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: SIG_CHNG,
         flags: Flag::IsSignal as u32,
-        access: Access::Browse,
+        access: Access::Read,
         param: "",
         result: "",
         description: "",

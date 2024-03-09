@@ -120,6 +120,11 @@ pub struct Client<T> {
     app_data: Option<Arc<T>>,
 }
 
+pub enum ProcessRequestMode {
+    ProcessInCurrentTask,
+    ProcessInExtraTask,
+}
+
 impl<T: Send + Sync + 'static> Client<T> {
 #[allow(clippy::new_without_default)]
     // FIXME: Provide a constructor for plain client, device and so on
@@ -142,9 +147,12 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> &mut Self {
+    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>, proc_req_mode: ProcessRequestMode) -> &mut Self {
         let path = path.as_ref();
-        let node = ShvNode::new_dynamic(methods_getter, request_handler);
+        let node = match proc_req_mode {
+            ProcessRequestMode::ProcessInCurrentTask => ShvNode::new_dynamic(methods_getter, request_handler),
+            ProcessRequestMode::ProcessInExtraTask => ShvNode::new_dynamic_spawned(methods_getter, request_handler),
+        };
         self.mounts.insert(path.into(), node);
         self
     }
@@ -394,7 +402,7 @@ mod tests {
         use super::*;
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
-        use crate::shvnode::SIG_CHNG;
+        use crate::shvnode::{SIG_CHNG, PROPERTY_METHODS, DIR_LS_METHODS};
 
         struct ConnectionMock {
             conn_evt_tx: Sender<ConnectionEvent>,
@@ -419,9 +427,13 @@ mod tests {
                 }
             }
 
+            fn emulate_receive_request(&self, request: RpcMessage) {
+                self.conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(request.to_frame().unwrap())).unwrap();
+            }
+
             fn emulate_receive_response(&self, from_request: &RpcMessage, result: impl Into<RpcValue>) {
                 let mut resp = from_request.prepare_response().unwrap();
-                resp.set_result(result.into()); // TODO: patch shv-rs to accept Into<RpcValue>
+                resp.set_result(result);
                 self.conn_evt_tx.unbounded_send(ConnectionEvent::RpcFrameReceived(resp.to_frame().unwrap())).unwrap();
             }
 
@@ -487,7 +499,7 @@ mod tests {
             assert!(msg.is_request());
             assert_eq!(msg.shv_path(), Some("path/test"));
             assert_eq!(msg.method(), Some("test_method"));
-            assert_eq!(msg.param(), Some(&RpcValue::from(42)));
+            assert_eq!(msg.param(), Some(&42.into()));
         }
 
         pub async fn send_message_fails(conn_evt_tx: Sender<ConnectionEvent>,
@@ -596,6 +608,114 @@ mod tests {
                 .expect_err("Unexpected notification received");
         }
 
+        fn collect_methods_with_ls_dir(methods: impl IntoIterator<Item = &'static MetaMethod>) -> Vec<&'static MetaMethod> {
+            DIR_LS_METHODS.iter().chain(methods).collect()
+        }
+
+        // Request handling tests
+        //
+        pub fn make_client_with_handlers() -> Client<()> {
+            async fn methods_getter(path: String, _: Option<Arc<()>>) -> Vec<&'static MetaMethod> {
+                if path.is_empty() {
+                    collect_methods_with_ls_dir(PROPERTY_METHODS.iter())
+                } else {
+                    [].into()
+                }
+            }
+            async fn request_handler(rq: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
+                let mut resp = rq.prepare_response().unwrap();
+                match rq.method() {
+                    Some(crate::shvnode::METH_DIR) => {
+                        let methods = methods_getter(rq.shv_path().unwrap_or_default().to_string(), None).await;
+                        let result = crate::shvnode::dir(methods.into_iter(), rq.param().into());
+                        resp.set_result(result);
+                    },
+                    Some(crate::shvnode::METH_LS) => {
+                        resp.set_result("ls");
+                    },
+                    Some(crate::shvnode::METH_GET) => {
+                        resp.set_result("get");
+                    },
+                    Some(crate::shvnode::METH_SET) => {
+                        resp.set_result("set");
+                    },
+                    _ => {
+                        resp.set_error(RpcError::new(
+                                RpcErrorCode::MethodNotFound,
+                                format!("Unknown method '{:?}'", rq.method())));
+                    }
+                }
+                client_cmd_tx.unbounded_send(ClientCommand::SendMessage{ message: resp }).unwrap();
+            }
+            let mut client = Client::new();
+            client.mount_dynamic("dynamic/sync",
+                                 methods_getter!(methods_getter),
+                                 handler_stateless!(request_handler),
+                                 ProcessRequestMode::ProcessInCurrentTask);
+            client.mount_dynamic("dynamic/async",
+                                 methods_getter!(methods_getter),
+                                 handler_stateless!(request_handler),
+                                 ProcessRequestMode::ProcessInExtraTask);
+            client.mount_static("static",
+                                PROPERTY_METHODS.iter(),
+                                [Route::new([crate::shvnode::METH_GET, crate::shvnode::METH_SET],
+                                            handler_stateless!(request_handler))]);
+            client
+        }
+
+        async fn recv_request_get_response(conn_mock: &mut ConnectionMock, request: RpcMessage) -> RpcMessage {
+            conn_mock.emulate_receive_request(request);
+            conn_mock.expect_send_message().await
+        }
+
+        pub async fn handle_method_calls(conn_evt_tx: Sender<ConnectionEvent>,
+                                         _cli_cmd_tx: Sender<ClientCommand>,
+                                         mut cli_evt_rx: ClientEventsReceiver)
+        {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+
+            {
+                // Nonexisting path
+                let request = RpcMessage::new_request("dynamic/a", "dir", None);
+                let response = recv_request_get_response(&mut conn_mock, request).await
+                    .result().expect_err("Response should be Err");
+                assert_eq!(response.code, RpcErrorCode::MethodNotFound);
+            }
+
+            {
+                // Access level is missing
+                let request = RpcMessage::new_request("dynamic/async", "dir", None);
+                let response = recv_request_get_response(&mut conn_mock, request).await
+                    .result().expect_err("Response should be Err");
+                assert_eq!(response.code, RpcErrorCode::InvalidRequest);
+            }
+
+            {
+                // Requests to a valid method with sufficient permissions
+                let mut request = RpcMessage::new_request("static", "get", None);
+                request.set_access("rd");
+                let response = recv_request_get_response(&mut conn_mock, request).await;
+                assert_eq!(response.result().expect("Response should be Ok").as_str(), "get");
+
+                let mut request = RpcMessage::new_request("dynamic/sync", "set", None);
+                request.set_access("srv");
+                let response = recv_request_get_response(&mut conn_mock, request).await;
+                assert_eq!(response.result().expect("Response should be Ok").as_str(), "set");
+
+                let mut request = RpcMessage::new_request("dynamic/async", "get", None);
+                request.set_access("su");
+                let response = recv_request_get_response(&mut conn_mock, request).await;
+                assert_eq!(response.result().expect("Response should be Ok").as_str(), "get");
+            }
+
+            {
+                // Insufficient permissions
+                let mut request = RpcMessage::new_request("dynamic/sync", "set", None);
+                request.set_access("rd");
+                let response = recv_request_get_response(&mut conn_mock, request).await;
+                assert_eq!(response.result().expect_err("Response should be Err").code, RpcErrorCode::PermissionDenied);
+            }
+        }
     }
 
     macro_rules! def_test{
@@ -639,6 +759,7 @@ mod tests {
     #[cfg(feature = "tokio")]
     pub mod tokio {
         use super::*;
+        use super::drivers::make_client_with_handlers;
 
         def_test!(receive_connected_and_disconnected_events);
         def_test!(send_message);
@@ -647,6 +768,8 @@ mod tests {
         def_test!(call_method_and_receive_response);
         def_test!(receive_subscribed_notification);
         def_test!(do_not_receive_unsubscribed_notification);
+
+        def_test!(handle_method_calls, make_client_with_handlers());
 
         #[generics(TestDriverBounds)]
         async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
@@ -674,6 +797,7 @@ mod tests {
     #[cfg(feature = "async_std")]
     pub mod async_std {
         use super::*;
+        use super::drivers::make_client_with_handlers;
 
         def_test!(receive_connected_and_disconnected_events);
         def_test!(send_message);
@@ -682,6 +806,8 @@ mod tests {
         def_test!(call_method_and_receive_response);
         def_test!(receive_subscribed_notification);
         def_test!(do_not_receive_unsubscribed_notification);
+
+        def_test!(handle_method_calls, make_client_with_handlers());
 
         #[generics(TestDriverBounds)]
         async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
