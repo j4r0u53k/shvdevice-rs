@@ -46,7 +46,7 @@ pub enum RequestResult {
     Error(RpcError),
 }
 
-pub type MethodsGetter<T> = Box<dyn for<'a> Fn(&'a str, Option<Arc<T>>) -> BoxFuture<'a, Vec<&'static MetaMethod>> + Sync + Send>;
+pub type MethodsGetter<T> = Box<dyn Fn(String, Option<Arc<T>>) -> BoxFuture<'static, Vec<&'static MetaMethod>> + Sync + Send>;
 pub type RequestHandler<T> = Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<Arc<T>>) -> BoxFuture<'static, ()> + Sync + Send>;
 
 pub struct Route<T> {
@@ -65,6 +65,13 @@ macro_rules! handler {
 macro_rules! handler_stateless {
     ($func:ident) => {
         Box::new(move |req, tx, _data| Box::pin($func(req, tx)))
+    };
+}
+
+#[macro_export]
+macro_rules! methods_getter {
+    ($func:ident) => {
+        Box::new(move |path, data| Box::pin($func(path, data)))
     };
 }
 

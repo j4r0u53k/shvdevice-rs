@@ -367,16 +367,17 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
             },
             ShvNodeInner::Dynamic(node) => {
                 let app_data = app_data.clone();
+                let shv_path = request.shv_path().unwrap_or_default().to_owned();
                 if node.spawned {
                     let node = node.clone();
                     spawn_task(async move {
-                        let methods = (node.methods)(request.shv_path().unwrap_or_default(), app_data.clone()).await;
+                        let methods = (node.methods)(shv_path, app_data.clone()).await;
                         if resolve_request_access(&request, &mount_path, &client_cmd_tx, methods) {
                             (node.handler)(request, client_cmd_tx, app_data).await;
                         }
                     });
                 } else {
-                    let methods = (node.methods)(request.shv_path().unwrap_or_default(), app_data.clone()).await;
+                    let methods = (node.methods)(shv_path, app_data.clone()).await;
                     if resolve_request_access(&request, &mount_path, &client_cmd_tx, methods) {
                         (node.handler)(request, client_cmd_tx, app_data).await;
                     }
