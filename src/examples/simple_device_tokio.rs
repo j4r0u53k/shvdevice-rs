@@ -106,7 +106,7 @@ async fn delay_node_process_request(
             };
             drop(counter);
             tokio::time::sleep(Duration::from_secs(3)).await;
-            resp.set_result(ret_val.into());
+            resp.set_result(ret_val);
             if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
                 error!("delay_node_process_request: Cannot send response ({e})");
             }
