@@ -278,12 +278,11 @@ impl<'a, T> StaticNode<'a, T> {
     }
 
     async fn process_request(&self, request: RpcMessage, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<Arc<T>>) {
-        if let Some(method) = request.method() {
-            if let Some(handler) = self.handlers.get(method) {
-                handler(request, client_cmd_tx, app_data.clone()).await;
-            } else {
-                self.process_dir_ls(&request, &client_cmd_tx);
-            }
+        let method = request.method().expect("method should be set and valid after request access check");
+        if let Some(handler) = self.handlers.get(method) {
+            handler(request, client_cmd_tx, app_data.clone()).await;
+        } else {
+            self.process_dir_ls(&request, &client_cmd_tx);
         }
     }
 
