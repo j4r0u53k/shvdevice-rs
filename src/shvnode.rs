@@ -163,8 +163,8 @@ pub fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<V
     let mut dir_exists = false;
     for (key, _) in mounts.range(path.to_owned()..) {
         if key.starts_with(path) {
-            dir_exists = true;
             if path.is_empty() || (key.len() > path.len() && key.as_bytes()[path.len()] == (b'/')) {
+                dir_exists = true;
                 let dir_rest_start = if path.is_empty() { 0 } else { path.len() + 1 };
                 let mut updirs = key[dir_rest_start..].split('/');
                 if let Some(dir) = updirs.next() {
@@ -493,6 +493,8 @@ mod tests {
         let mut mounts = BTreeMap::new();
         mounts.insert("a".into(), ());
         mounts.insert("a/1".into(), ());
+        mounts.insert("a/123".into(), ());
+        mounts.insert("a/xyz".into(), ());
         mounts.insert("b/2/C".into(), ());
         mounts.insert("b/2/D".into(), ());
         mounts.insert("b/3/E".into(), ());
@@ -502,7 +504,15 @@ mod tests {
         );
         assert_eq!(
             super::children_on_path(&mounts, "a"),
-            Some(vec!["1".to_string()])
+            Some(vec!["1".to_string(), "123".to_string(), "xyz".to_string()])
+        );
+        assert_eq!(
+            super::children_on_path(&mounts, "a/1"),
+            None
+        );
+        assert_eq!(
+            super::children_on_path(&mounts, "a/xy"),
+            None
         );
         assert_eq!(
             super::children_on_path(&mounts, "b/2"),
