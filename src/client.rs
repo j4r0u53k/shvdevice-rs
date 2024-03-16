@@ -403,6 +403,7 @@ mod tests {
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
         use crate::shvnode::{SIG_CHNG, PROPERTY_METHODS};
+        use shv::metamethod::AccessLevel;
 
         struct ConnectionMock {
             conn_evt_tx: Sender<ConnectionEvent>,
@@ -699,22 +700,22 @@ mod tests {
             {
                 // Requests to a valid method with sufficient permissions
                 let mut request = RpcMessage::new_request("static", "get", None);
-                request.set_access("rd");
+                request.set_access_level(AccessLevel::Read);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect("Response should be Ok").as_str(), "get");
 
                 let mut request = RpcMessage::new_request("dynamic/sync", "set", None);
-                request.set_access("srv");
+                request.set_access_level(AccessLevel::Service);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect("Response should be Ok").as_str(), "set");
 
                 let mut request = RpcMessage::new_request("dynamic/async", "get", None);
-                request.set_access("su");
+                request.set_access_level(AccessLevel::Superuser);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect("Response should be Ok").as_str(), "get");
 
                 let mut request = RpcMessage::new_request("dynamic/async", "dir", None);
-                request.set_access("bws");
+                request.set_access_level(AccessLevel::Browse);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect("Response should be Ok").as_list().len(), 5);
             }
@@ -722,17 +723,17 @@ mod tests {
             {
                 // Insufficient permissions
                 let mut request = RpcMessage::new_request("static", "set", None);
-                request.set_access("bws");
+                request.set_access_level(AccessLevel::Browse);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect_err("Response should be Err").code, RpcErrorCode::PermissionDenied);
 
                 let mut request = RpcMessage::new_request("dynamic/sync", "set", None);
-                request.set_access("rd");
+                request.set_access_level(AccessLevel::Read);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect_err("Response should be Err").code, RpcErrorCode::PermissionDenied);
 
                 let mut request = RpcMessage::new_request("dynamic/async", "get", None);
-                request.set_access("bws");
+                request.set_access_level(AccessLevel::Browse);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect_err("Response should be Err").code, RpcErrorCode::PermissionDenied);
             }

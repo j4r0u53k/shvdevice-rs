@@ -78,7 +78,7 @@ const METH_GET_DELAYED: &str = "getDelayed";
 const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
     name: METH_GET_DELAYED,
     flags: Flag::IsGetter as u32,
-    access: shv::metamethod::Access::Browse,
+    access: shv::metamethod::AccessLevel::Browse,
     param: "",
     result: "",
     description: "",

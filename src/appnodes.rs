@@ -1,7 +1,7 @@
 use crate::shvnode::METH_PING;
 use crate::client::{Route, ClientCommand, Sender};
 use log::error;
-use shv::metamethod::{Access, Flag, MetaMethod};
+use shv::metamethod::{AccessLevel, Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcValue, RpcMessage};
 
 const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
@@ -20,7 +20,7 @@ pub const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {
         name: METH_SHV_VERSION_MAJOR,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",
@@ -28,7 +28,7 @@ pub const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {
         name: METH_SHV_VERSION_MINOR,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",
@@ -36,7 +36,7 @@ pub const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {
         name: METH_NAME,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",
@@ -44,7 +44,7 @@ pub const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {
         name: METH_PING,
         flags: Flag::None as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",
@@ -99,7 +99,7 @@ pub const APP_DEVICE_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_NAME,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",
@@ -107,7 +107,7 @@ pub const APP_DEVICE_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_VERSION,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",
@@ -115,7 +115,7 @@ pub const APP_DEVICE_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_SERIAL_NUMBER,
         flags: Flag::IsGetter as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "",
         result: "",
         description: "",

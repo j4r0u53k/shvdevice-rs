@@ -4,7 +4,7 @@
 use crate::client::{ClientCommand, RequestHandler, RequestResult, Route, Sender, MethodsGetter};
 use crate::runtime::spawn_task;
 use log::{error, warn};
-use shv::metamethod::Access;
+use shv::metamethod::AccessLevel;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::rpcframe::RpcFrame;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
@@ -369,11 +369,10 @@ fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_
             return Err(RpcError::new(RpcErrorCode::MethodNotFound,
                                      format!("Unknown method on path '{mount_path}/{shv_path}:{method}()'")));
         };
-        let rq_level_str = request.access().unwrap_or_default();
-        let Some(rq_level) = Access::from_str(rq_level_str) else {
+        let Some(rq_level) = request.access_level() else {
             return Err(RpcError::new(RpcErrorCode::InvalidRequest, "Undefined access level"));
         };
-        if rq_level >= mm.access {
+        if rq_level >= mm.access as i32 {
             Ok(())
         } else {
             Err(RpcError::new(
@@ -438,7 +437,7 @@ pub const DIR_LS_METHODS: [MetaMethod; 2] = [
     MetaMethod {
         name: METH_DIR,
         flags: Flag::None as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "DirParam",
         result: "DirResult",
         description: "",
@@ -446,7 +445,7 @@ pub const DIR_LS_METHODS: [MetaMethod; 2] = [
     MetaMethod {
         name: METH_LS,
         flags: Flag::None as u32,
-        access: Access::Browse,
+        access: AccessLevel::Browse,
         param: "LsParam",
         result: "LsResult",
         description: "",
@@ -456,7 +455,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_GET,
         flags: Flag::IsGetter as u32,
-        access: Access::Read,
+        access: AccessLevel::Read,
         param: "",
         result: "",
         description: "",
@@ -464,7 +463,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_SET,
         flags: Flag::IsSetter as u32,
-        access: Access::Write,
+        access: AccessLevel::Write,
         param: "",
         result: "",
         description: "",
@@ -472,7 +471,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: SIG_CHNG,
         flags: Flag::IsSignal as u32,
-        access: Access::Read,
+        access: AccessLevel::Read,
         param: "",
         result: "",
         description: "",
