@@ -4,5 +4,11 @@ mod connection;
 mod runtime;
 pub mod shvnode;
 pub use client::{
-    Client, ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender,
+    AppData,
+    Client,
+    ClientCommand,
+    ClientEvent,
+    ClientEventsReceiver,
+    Route,
+    Sender,
 };

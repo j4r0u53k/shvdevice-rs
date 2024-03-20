@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
@@ -13,7 +12,7 @@ use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvclient::shvnode::SIG_CHNG;
-use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender};
+use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -89,7 +88,7 @@ type State = RwLock<i32>;
 async fn delay_node_process_request(
     request: RpcMessage,
     client_cmd_tx: Sender<ClientCommand>,
-    mut state: Option<Arc<State>>,
+    mut state: Option<AppData<State>>,
 ) {
     if request.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(request.method(), Some(METH_GET_DELAYED));
@@ -125,7 +124,7 @@ fn delay_node_routes() -> Vec<Route<State>> {
 async fn emit_chng_task(
     client_cmd_tx: Sender<ClientCommand>,
     mut client_evt_rx: ClientEventsReceiver,
-    app_data: Arc<State>,
+    app_data: AppData<State>,
 ) -> shv::Result<()> {
     info!("signal task started");
 
@@ -173,7 +172,7 @@ pub(crate) async fn main() -> shv::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = Arc::new(RwLock::new(-10));
+    let counter = AppData::new(RwLock::new(-10));
     let cnt = counter.clone();
 
     let app_tasks = move |client_cmd_tx, client_evt_rx| {

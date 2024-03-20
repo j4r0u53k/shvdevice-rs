@@ -46,8 +46,8 @@ pub enum RequestResult {
     Error(RpcError),
 }
 
-pub type MethodsGetter<T> = Box<dyn Fn(String, Option<Arc<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>;
-pub type RequestHandler<T> = Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<Arc<T>>) -> BoxFuture<'static, ()> + Sync + Send>;
+pub type MethodsGetter<T> = Box<dyn Fn(String, Option<AppData<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>;
+pub type RequestHandler<T> = Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>;
 
 pub struct Route<T> {
     pub handler: RequestHandler<T>,
@@ -115,9 +115,36 @@ impl ClientEventsReceiver {
     }
 }
 
+pub struct AppData<T: ?Sized>(Arc<T>);
+
+impl<T> AppData<T> {
+    pub fn new(data: T) -> Self {
+        Self(Arc::new(data))
+    }
+}
+
+impl<T: ?Sized> std::ops::Deref for AppData<T> {
+    type Target = Arc<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: ?Sized> Clone for AppData<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T: ?Sized> From<Arc<T>> for AppData<T> {
+    fn from(value: Arc<T>) -> Self {
+        Self(value)
+    }
+}
+
 pub struct Client<T> {
     mounts: BTreeMap<String, ShvNode<'static, T>>,
-    app_data: Option<Arc<T>>,
+    app_data: Option<AppData<T>>,
 }
 
 pub enum ProcessRequestMode {
@@ -157,7 +184,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn with_app_data(&mut self, app_data: Arc<T>) -> &mut Self {
+    pub fn with_app_data(&mut self, app_data: AppData<T>) -> &mut Self {
         self.app_data = Some(app_data);
         self
     }
@@ -612,7 +639,7 @@ mod tests {
         // Request handling tests
         //
         pub fn make_client_with_handlers() -> Client<()> {
-            async fn methods_getter(path: String, _: Option<Arc<()>>) -> Option<Vec<&'static MetaMethod>> {
+            async fn methods_getter(path: String, _: Option<AppData<()>>) -> Option<Vec<&'static MetaMethod>> {
                 if path.is_empty() {
                     Some(PROPERTY_METHODS.iter().collect())
                 } else {

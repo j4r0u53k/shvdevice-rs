@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::client::{ClientCommand, RequestHandler, RequestResult, Route, Sender, MethodsGetter};
+use crate::client::{ClientCommand, RequestHandler, RequestResult, Route, Sender, MethodsGetter, AppData};
 use crate::runtime::spawn_task;
 use log::{error, warn};
 use shv::metamethod::AccessLevel;
@@ -300,7 +300,7 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
         Self(ShvNodeInner::Dynamic(Arc::new(DynamicNode { methods, handler, spawned: true })))
     }
 
-    pub async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<Arc<T>>) {
+    pub async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
         match &self.0 {
             ShvNodeInner::Static(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
@@ -516,7 +516,7 @@ mod tests {
         );
     }
 
-    async fn dummy_handler(_: RpcMessage, _: Sender<ClientCommand>, _: Option<Arc<()>>) {}
+    async fn dummy_handler(_: RpcMessage, _: Sender<ClientCommand>, _: Option<AppData<()>>) {}
 
     #[test]
     fn accept_valid_routes() {
