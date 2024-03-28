@@ -11,7 +11,7 @@ use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
-use shvclient::shvnode::SIG_CHNG;
+use shvclient::SIG_CHNG;
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
 
@@ -179,10 +179,19 @@ pub(crate) async fn main() -> shv::Result<()> {
         tokio::task::spawn(emit_chng_task(client_cmd_tx, client_evt_rx, counter));
     };
 
+    async fn dyn_methods_getter(_path: String, _: Option<AppData<RwLock<i32>>>) -> Option<Vec<&'static MetaMethod>> {
+        Some(shvclient::PROPERTY_METHODS.iter().collect())
+    }
+    async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
+    }
+
     shvclient::Client::new()
         .mount_static(".app", &APP_METHODS, app_node_routes())
         .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
         .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
+        .mount_dynamic("status/dyn",
+                       shvclient::methods_getter!(dyn_methods_getter),
+                       shvclient::handler_stateless!(dyn_handler), shvclient::ProcessRequestMode::ProcessInCurrentTask)
         .with_app_data(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)

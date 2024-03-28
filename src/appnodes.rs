@@ -1,4 +1,4 @@
-use crate::shvnode::METH_PING;
+use crate::devicenode::METH_PING;
 use crate::client::{Route, ClientCommand, Sender};
 use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};

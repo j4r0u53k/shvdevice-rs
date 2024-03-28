@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::client::{ClientCommand, RequestHandler, RequestResult, Route, Sender, MethodsGetter, AppData};
+use crate::client::{ClientCommand, RequestHandler, Route, Sender, MethodsGetter, AppData};
 use crate::runtime::spawn_task;
 use log::{error, warn};
 use shv::metamethod::AccessLevel;
@@ -14,11 +14,11 @@ use std::format;
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub const DOT_LOCAL_GRANT: &str = "dot-local";
-pub const DOT_LOCAL_DIR: &str = ".local";
-pub const DOT_LOCAL_HACK: &str = "dot-local-hack";
+const DOT_LOCAL_GRANT: &str = "dot-local";
+const DOT_LOCAL_DIR: &str = ".local";
+const DOT_LOCAL_HACK: &str = "dot-local-hack";
 
-pub enum DirParam {
+enum DirParam {
     Brief,
     Full,
     BriefMethod(String),
@@ -40,7 +40,7 @@ impl From<Option<&RpcValue>> for DirParam {
     }
 }
 
-pub fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -> RpcValue {
+fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -> RpcValue {
     let mut result = RpcValue::null();
     let mut lst = rpcvalue::List::new();
     for mm in methods {
@@ -83,6 +83,12 @@ impl From<Option<&RpcValue>> for LsParam {
             None => LsParam::List,
         }
     }
+}
+
+
+pub enum RequestResult {
+    Response(RpcValue),
+    Error(RpcError),
 }
 
 pub fn process_local_dir_ls<V>(
@@ -274,35 +280,36 @@ impl<'a, T> StaticNode<'a, T> {
     }
 }
 
+pub enum ProcessRequestMode {
+    ProcessInCurrentTask,
+    ProcessInExtraTask,
+}
+
 struct DynamicNode<T> {
     methods: MethodsGetter<T>,
     handler: RequestHandler<T>,
-    spawned: bool,
+    mode: ProcessRequestMode,
 }
 
-enum ShvNodeInner<'a, T> {
+enum NodeVariant<'a, T> {
     Static(StaticNode<'a, T>),
     Dynamic(Arc<DynamicNode<T>>),
 }
 
-pub struct ShvNode<'a, T>(ShvNodeInner<'a, T>);
+pub struct DeviceNode<'a, T>(NodeVariant<'a, T>);
 
-impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
+impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
     pub fn new_static(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
-        Self(ShvNodeInner::Static(StaticNode::new(methods, routes)))
+        Self(NodeVariant::Static(StaticNode::new(methods, routes)))
     }
 
-    pub fn new_dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
-        Self(ShvNodeInner::Dynamic(Arc::new(DynamicNode { methods, handler, spawned: false })))
-    }
-
-    pub fn new_dynamic_spawned(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
-        Self(ShvNodeInner::Dynamic(Arc::new(DynamicNode { methods, handler, spawned: true })))
+    pub fn new_dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>, process_req_mode: ProcessRequestMode) -> Self {
+        Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler, mode: process_req_mode })))
     }
 
     pub async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
         match &self.0 {
-            ShvNodeInner::Static(node) => {
+            NodeVariant::Static(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
                     node.methods.as_slice()
                 } else {
@@ -327,10 +334,10 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
                     }
                 }
             },
-            ShvNodeInner::Dynamic(node) => {
+            NodeVariant::Dynamic(node) => {
                 let app_data = app_data.clone();
                 let shv_path = request.shv_path().unwrap_or_default().to_owned();
-                let spawned = node.spawned;
+                let use_extra_task = matches!(node.mode, ProcessRequestMode::ProcessInExtraTask);
                 let node = node.clone();
                 let process_method_call = async move {
                     let methods = (node.methods)(shv_path, app_data.clone()).await
@@ -350,7 +357,7 @@ impl<'a, T: Sync + Send + 'static> ShvNode<'a, T> {
                         };
                     }
                 };
-                if spawned {
+                if use_extra_task {
                     spawn_task(process_method_call);
                 } else {
                     process_method_call.await;
@@ -520,46 +527,46 @@ mod tests {
 
     #[test]
     fn accept_valid_routes() {
-        ShvNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::new_static(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
     }
 
     #[test]
     fn accept_valid_routes_without_ls() {
-        ShvNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::new_static(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
-        ShvNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::new_static(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS, SIG_CHNG], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_custom_dir_handler() {
-        ShvNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::new_static(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_DIR], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
+        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_unhandled_method() {
-        ShvNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
+        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_duplicate_method() {
         let duplicate_methods = PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
-        ShvNode::new_static(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
+        DeviceNode::new_static(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
     }
 }

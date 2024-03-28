@@ -10,7 +10,7 @@ use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
-use shvclient::shvnode::SIG_CHNG;
+use shvclient::SIG_CHNG;
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
 

@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::shvnode::{find_longest_prefix, process_local_dir_ls, ShvNode};
+use crate::devicenode::{find_longest_prefix, process_local_dir_ls, ProcessRequestMode, DeviceNode, RequestResult};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, FutureExt, StreamExt};
@@ -41,17 +41,25 @@ pub enum ClientCommand {
 
 const BROKER_APP_NODE: &str = ".broker/app";
 
-pub enum RequestResult {
-    Response(RpcValue),
-    Error(RpcError),
-}
-
 pub type MethodsGetter<T> = Box<dyn Fn(String, Option<AppData<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>;
 pub type RequestHandler<T> = Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>;
 
 pub struct Route<T> {
     pub handler: RequestHandler<T>,
     pub methods: Vec<String>,
+}
+
+impl<T> Route<T> {
+    pub fn new<I>(methods: I, handler: RequestHandler<T>) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<String>,
+    {
+        Self {
+            handler,
+            methods: methods.into_iter().map(|x| x.into()).collect(),
+        }
+    }
 }
 
 #[macro_export]
@@ -73,19 +81,6 @@ macro_rules! methods_getter {
     ($func:ident) => {
         Box::new(move |path, data| Box::pin($func(path, data)))
     };
-}
-
-impl<T> Route<T> {
-    pub fn new<I>(methods: I, handler: RequestHandler<T>) -> Self
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        Self {
-            handler,
-            methods: methods.into_iter().map(|x| x.into()).collect(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -143,13 +138,8 @@ impl<T: ?Sized> From<Arc<T>> for AppData<T> {
 }
 
 pub struct Client<T> {
-    mounts: BTreeMap<String, ShvNode<'static, T>>,
+    mounts: BTreeMap<String, DeviceNode<'static, T>>,
     app_data: Option<AppData<T>>,
-}
-
-pub enum ProcessRequestMode {
-    ProcessInCurrentTask,
-    ProcessInExtraTask,
 }
 
 impl<T: Send + Sync + 'static> Client<T> {
@@ -169,17 +159,14 @@ impl<T: Send + Sync + 'static> Client<T> {
         R: IntoIterator<Item = Route<T>>,
     {
         let path = path.as_ref();
-        let node = ShvNode::new_static(defined_methods, routes);
+        let node = DeviceNode::new_static(defined_methods, routes);
         self.mounts.insert(path.into(), node);
         self
     }
 
     pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>, proc_req_mode: ProcessRequestMode) -> &mut Self {
         let path = path.as_ref();
-        let node = match proc_req_mode {
-            ProcessRequestMode::ProcessInCurrentTask => ShvNode::new_dynamic(methods_getter, request_handler),
-            ProcessRequestMode::ProcessInExtraTask => ShvNode::new_dynamic_spawned(methods_getter, request_handler),
-        };
+        let node = DeviceNode::new_dynamic(methods_getter, request_handler, proc_req_mode);
         self.mounts.insert(path.into(), node);
         self
     }
@@ -429,7 +416,7 @@ mod tests {
         use super::*;
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
-        use crate::shvnode::{SIG_CHNG, PROPERTY_METHODS};
+        use crate::devicenode::{SIG_CHNG, PROPERTY_METHODS};
         use shv::metamethod::AccessLevel;
 
         struct ConnectionMock {
@@ -649,13 +636,13 @@ mod tests {
             async fn request_handler(rq: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
                 let mut resp = rq.prepare_response().unwrap();
                 match rq.method() {
-                    Some(crate::shvnode::METH_LS) => {
+                    Some(crate::devicenode::METH_LS) => {
                         resp.set_result("ls");
                     },
-                    Some(crate::shvnode::METH_GET) => {
+                    Some(crate::devicenode::METH_GET) => {
                         resp.set_result("get");
                     },
-                    Some(crate::shvnode::METH_SET) => {
+                    Some(crate::devicenode::METH_SET) => {
                         resp.set_result("set");
                     },
                     _ => {
@@ -677,7 +664,7 @@ mod tests {
                                  ProcessRequestMode::ProcessInExtraTask);
             client.mount_static("static",
                                 PROPERTY_METHODS.iter(),
-                                [Route::new([crate::shvnode::METH_GET, crate::shvnode::METH_SET],
+                                [Route::new([crate::devicenode::METH_GET, crate::devicenode::METH_SET],
                                             handler_stateless!(request_handler))]);
             client
         }
