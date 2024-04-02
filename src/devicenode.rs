@@ -14,10 +14,6 @@ use std::format;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const DOT_LOCAL_GRANT: &str = "dot-local";
-const DOT_LOCAL_DIR: &str = ".local";
-const DOT_LOCAL_HACK: &str = "dot-local-hack";
-
 enum DirParam {
     Brief,
     Full,
@@ -100,14 +96,9 @@ pub fn process_local_dir_ls<V>(
         return None;
     }
     let shv_path = frame.shv_path().unwrap_or_default();
-    let mut children_on_path = children_on_path(mounts, shv_path);
-    if let Some(children_on_path) = children_on_path.as_mut() {
-        if frame.meta.get(DOT_LOCAL_HACK).is_some() {
-            children_on_path.insert(0, DOT_LOCAL_DIR.into());
-        }
-    }
     let mount = find_longest_prefix(mounts, shv_path);
     let is_mount_point = mount.is_some();
+    let children_on_path = children_on_path(mounts, shv_path);
     let is_leaf = match &children_on_path {
         None => is_mount_point,
         Some(dirs) => dirs.is_empty(),
