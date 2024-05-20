@@ -18,7 +18,6 @@ pub use devicenode::{
     SIG_CHNG,
     DIR_LS_METHODS,
     PROPERTY_METHODS,
-    ProcessRequestMode,
     default_ls,
     send_response,
 };

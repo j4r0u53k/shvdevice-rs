@@ -271,15 +271,9 @@ impl<'a, T> StaticNode<'a, T> {
     }
 }
 
-pub enum ProcessRequestMode {
-    ProcessInCurrentTask,
-    ProcessInExtraTask,
-}
-
 struct DynamicNode<T> {
     methods: MethodsGetter<T>,
     handler: RequestHandler<T>,
-    mode: ProcessRequestMode,
 }
 
 enum NodeVariant<'a, T> {
@@ -294,8 +288,8 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
         Self(NodeVariant::Static(StaticNode::new(methods, routes)))
     }
 
-    pub fn new_dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>, process_req_mode: ProcessRequestMode) -> Self {
-        Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler, mode: process_req_mode })))
+    pub fn new_dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
+        Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler })))
     }
 
     pub async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
@@ -316,7 +310,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                         let result = dir(methods.iter().copied(), request.param().into());
                         send_response(request, client_cmd_tx, Ok(result));
                     } else if let Some(handler) = node.handlers.get(method) {
-                        handler(request, client_cmd_tx, app_data.clone()).await;
+                        spawn_task(handler(request, client_cmd_tx, app_data.clone()));
                     } else if method == self::METH_LS {
                         let result = default_ls(request.param());
                         send_response(request, client_cmd_tx, Ok(result));
@@ -328,9 +322,8 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
             NodeVariant::Dynamic(node) => {
                 let app_data = app_data.clone();
                 let shv_path = request.shv_path().unwrap_or_default().to_owned();
-                let use_extra_task = matches!(node.mode, ProcessRequestMode::ProcessInExtraTask);
                 let node = node.clone();
-                let process_method_call = async move {
+                spawn_task(async move {
                     let methods = (node.methods)(shv_path, app_data.clone()).await
                         .map_or_else(
                             Vec::new,
@@ -347,12 +340,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                                 panic!("BUG: Request method should be Some after access check."),
                         };
                     }
-                };
-                if use_extra_task {
-                    spawn_task(process_method_call);
-                } else {
-                    process_method_call.await;
-                }
+                });
             }
         }
     }

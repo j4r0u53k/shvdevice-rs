@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::devicenode::{find_longest_prefix, process_local_dir_ls, ProcessRequestMode, DeviceNode, RequestResult};
+use crate::devicenode::{find_longest_prefix, process_local_dir_ls, DeviceNode, RequestResult};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, FutureExt, StreamExt};
@@ -164,9 +164,9 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>, proc_req_mode: ProcessRequestMode) -> &mut Self {
+    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> &mut Self {
         let path = path.as_ref();
-        let node = DeviceNode::new_dynamic(methods_getter, request_handler, proc_req_mode);
+        let node = DeviceNode::new_dynamic(methods_getter, request_handler);
         self.mounts.insert(path.into(), node);
         self
     }
@@ -656,12 +656,10 @@ mod tests {
             let mut client = Client::new();
             client.mount_dynamic("dynamic/sync",
                                  methods_getter!(methods_getter),
-                                 handler_stateless!(request_handler),
-                                 ProcessRequestMode::ProcessInCurrentTask);
+                                 handler_stateless!(request_handler));
             client.mount_dynamic("dynamic/async",
                                  methods_getter!(methods_getter),
-                                 handler_stateless!(request_handler),
-                                 ProcessRequestMode::ProcessInExtraTask);
+                                 handler_stateless!(request_handler));
             client.mount_static("static",
                                 PROPERTY_METHODS.iter(),
                                 [Route::new([crate::devicenode::METH_GET, crate::devicenode::METH_SET],
