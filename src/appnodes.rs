@@ -1,20 +1,38 @@
+
 use crate::devicenode::METH_PING;
 use crate::client::{ClientCommand, RequestHandler, Route, Sender};
 use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};
-use shv::{RpcMessageMetaTags, RpcValue, RpcMessage};
+use shv::{RpcMessageMetaTags, RpcMessage};
 
-const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
-const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
-const METH_NAME: &str = "name";
-const METH_VERSION: &str = "version";
-const METH_SERIAL_NUMBER: &str = "serialNumber";
+pub use shv::RpcValue;
 
-struct AppNode {
-    pub app_name: &'static str,
-    pub shv_version_major: i32,
-    pub shv_version_minor: i32,
-}
+pub const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
+pub const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
+pub const METH_NAME: &str = "name";
+pub const METH_VERSION: &str = "version";
+pub const METH_SERIAL_NUMBER: &str = "serialNumber";
+
+pub const SHV_VERSION_MAJOR: i32 = 3;
+pub const SHV_VERSION_MINOR: i32 = 0;
+
+// TODO: Use for future implementation of standalone (info) nodes
+
+// struct AppNode {
+//     app_name: String,
+//     shv_version_major: i32,
+//     shv_version_minor: i32,
+// }
+//
+// impl AppNode {
+//     pub fn new(app_name: impl Into<String>) -> Self {
+//         Self {
+//             app_name: app_name.into(),
+//             shv_version_major: SHV_VERSION_MAJOR,
+//             shv_version_minor: SHV_VERSION_MINOR,
+//         }
+//     }
+// }
 
 pub const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {
@@ -51,44 +69,46 @@ pub const APP_METHODS: [MetaMethod; 4] = [
     },
 ];
 
-const APP_NODE: AppNode = AppNode {
-    app_name: "",
-    shv_version_major: 3,
-    shv_version_minor: 0,
-};
-
-async fn app_node_process_request(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
-    if request.shv_path().unwrap_or_default().is_empty() {
-        let mut resp = request.prepare_response().unwrap_or_default();
-        let resp_value = match request.method() {
-            Some(METH_SHV_VERSION_MAJOR) => Some(APP_NODE.shv_version_major.into()),
-            Some(METH_SHV_VERSION_MINOR) => Some(APP_NODE.shv_version_minor.into()),
-            Some(METH_NAME) => Some(RpcValue::from(APP_NODE.app_name)),
-            Some(METH_PING) => Some(().into()),
-            _ => None,
-        };
-        if let Some(val) = resp_value {
-            resp.set_result(val);
-            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
-                error!("app_node_process_request: Cannot send response ({e})");
+#[macro_export]
+macro_rules! app_node {
+    ($appname:literal) => {
+        {
+            async fn process_request(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
+                if request.shv_path().unwrap_or_default().is_empty() {
+                    let mut resp = request.prepare_response().unwrap_or_default();
+                    let resp_value = match request.method() {
+                        Some(METH_SHV_VERSION_MAJOR) => Some($crate::appnodes::SHV_VERSION_MAJOR.into()),
+                        Some(METH_SHV_VERSION_MINOR) => Some($crate::appnodes::SHV_VERSION_MINOR.into()),
+                        Some(METH_NAME) => Some($crate::appnodes::RpcValue::from($appname.to_string())),
+                        Some(METH_PING) => Some(().into()),
+                        _ => None,
+                    };
+                    if let Some(val) = resp_value {
+                        resp.set_result(val);
+                        if let Err(e) = client_cmd_tx.unbounded_send($crate::client::ClientCommand::SendMessage { message: resp }) {
+                            error!("app_node_process_request: Cannot send response ({e})");
+                        }
+                    }
+                }
             }
+            $crate::devicenode::DeviceNode::new_static(
+                &$crate::appnodes::APP_METHODS,
+                [$crate::client::Route::new(
+                    [
+                    $crate::appnodes::METH_SHV_VERSION_MAJOR,
+                    $crate::appnodes::METH_SHV_VERSION_MINOR,
+                    $crate::appnodes::METH_NAME,
+                    $crate::devicenode::METH_PING,
+                    ],
+                    $crate::RequestHandler::stateless(process_request)
+                )]
+            )
+
         }
-    }
+    };
 }
 
-pub fn app_node_routes<S>() -> Vec<Route<S>> {
-    [Route::new(
-        [
-            METH_SHV_VERSION_MAJOR,
-            METH_SHV_VERSION_MINOR,
-            METH_NAME,
-            METH_PING,
-        ],
-        RequestHandler::stateless(app_node_process_request),
-    )]
-    .into()
-}
-
+// TODO: Use for future implementation of standalone (info) nodes
 struct AppDeviceNode {
     pub device_name: &'static str,
     pub version: &'static str,

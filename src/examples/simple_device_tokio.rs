@@ -8,10 +8,9 @@ use log::*;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
-use shvclient::appnodes::{
-    app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
-};
-use shvclient::{MethodsGetter, RequestHandler, SIG_CHNG};
+use shvclient::{MethodsGetter, RequestHandler};
+use shvclient::{app_node, appnodes::*};
+use shvclient::devicenode::{DeviceNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
 
@@ -113,13 +112,14 @@ async fn delay_node_process_request(
     }
 }
 
-fn delay_node_routes() -> Vec<Route<State>> {
-    [Route::new(
-        [METH_GET_DELAYED],
-        RequestHandler::stateful(delay_node_process_request),
-    )]
-    .into()
-}
+// fn delay_node_routes() -> Vec<Route<State>> {
+//     [Route::new(
+//         [METH_GET_DELAYED],
+//         shvclient::handler!(delay_node_process_request),
+//     )]
+//     .into()
+// }
+
 
 async fn emit_chng_task(
     client_cmd_tx: Sender<ClientCommand>,
@@ -180,18 +180,29 @@ pub(crate) async fn main() -> shv::Result<()> {
     };
 
     async fn dyn_methods_getter(_path: String, _: Option<AppData<RwLock<i32>>>) -> Option<Vec<&'static MetaMethod>> {
-        Some(shvclient::PROPERTY_METHODS.iter().collect())
+        Some(PROPERTY_METHODS.iter().collect())
     }
     async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
     }
 
+    // fn delay_node<'a>() -> DeviceNode<'a, State> {
+    let delay_node = DeviceNode::new_static(
+        &DELAY_METHODS,
+        [Route::new(
+            [METH_GET_DELAYED],
+            RequestHandler::stateful(delay_node_process_request),
+        )]
+    );
+    // }
+
     shvclient::Client::new()
-        .mount_static(".app", &APP_METHODS, app_node_routes())
-        .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
-        .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
-        .mount_dynamic("status/dyn",
-                        MethodsGetter::new(dyn_methods_getter),
-                        RequestHandler::stateless(dyn_handler))
+        .mount(".app", app_node!("simple_device_tokio"))
+        // .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
+        // .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
+        .mount("status/delayed", delay_node)
+        .mount("status/dyn", DeviceNode::new_dynamic(
+                MethodsGetter::new(dyn_methods_getter),
+                RequestHandler::stateless(dyn_handler)))
         .with_app_data(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)

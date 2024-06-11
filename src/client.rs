@@ -152,30 +152,33 @@ pub struct Client<T> {
 
 impl<T: Send + Sync + 'static> Client<T> {
 #[allow(clippy::new_without_default)]
-    // FIXME: Provide a constructor for plain client, device and so on
-    pub fn new() -> Self {
+    pub fn new(/*params: AppParams*/) -> Self {
         Self {
             mounts: Default::default(),
             app_data: Default::default(),
         }
     }
 
-    pub fn mount_static<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
-    where
-        P: AsRef<str>,
-        M: IntoIterator<Item = &'static MetaMethod>,
-        R: IntoIterator<Item = Route<T>>,
-    {
-        let path = path.as_ref();
-        let node = DeviceNode::new_static(defined_methods, routes);
+    pub fn mount<P: Into<String>>(&mut self, path: P, node: DeviceNode<'static, T>) -> &mut Self {
         self.mounts.insert(path.into(), node);
         self
     }
 
-    pub fn mount_dynamic<P: AsRef<str>>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> &mut Self {
-        let path = path.as_ref();
-        let node = DeviceNode::new_dynamic(methods_getter, request_handler);
-        self.mounts.insert(path.into(), node);
+    pub fn mount_static<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
+    where
+        P: Into<String>,
+        M: IntoIterator<Item = &'static MetaMethod>,
+        R: IntoIterator<Item = Route<T>>,
+    {
+        self.mounts.insert(path.into(), DeviceNode::new_static(defined_methods, routes));
+        self
+    }
+
+    pub fn mount_dynamic<P>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> &mut Self
+    where
+        P: Into<String>,
+    {
+        self.mounts.insert(path.into(), DeviceNode::new_dynamic(methods_getter, request_handler));
         self
     }
 
@@ -330,6 +333,8 @@ impl<T: Send + Sync + 'static> Client<T> {
                     let local_result = process_local_dir_ls(&self.mounts, &frame);
                     match local_result {
                         None => {
+                            // handle .app, .device as special cases
+                            // TODO
                             if let Some((mount, path)) = find_longest_prefix(&self.mounts, shv_path) {
                                 request_msg.set_shvpath(path);
                                 let node = self.mounts.get(mount).unwrap_or_else(|| panic!("A node on path '{mount}' should exist"));
