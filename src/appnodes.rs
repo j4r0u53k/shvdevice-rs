@@ -1,5 +1,5 @@
 use crate::devicenode::METH_PING;
-use crate::client::{Route, ClientCommand, Sender};
+use crate::client::{ClientCommand, RequestHandler, Route, Sender};
 use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};
 use shv::{RpcMessageMetaTags, RpcValue, RpcMessage};
@@ -84,7 +84,7 @@ pub fn app_node_routes<S>() -> Vec<Route<S>> {
             METH_NAME,
             METH_PING,
         ],
-        crate::handler_stateless!(app_node_process_request),
+        RequestHandler::stateless(app_node_process_request),
     )]
     .into()
 }
@@ -152,7 +152,7 @@ async fn app_device_node_process_request(request: RpcMessage, client_cmd_tx: Sen
 pub fn app_device_node_routes<T>() -> Vec<Route<T>> {
     [Route::new(
         [METH_NAME, METH_VERSION, METH_SERIAL_NUMBER],
-        crate::handler_stateless!(app_device_node_process_request),
+        RequestHandler::stateless(app_device_node_process_request),
     )]
     .into()
 }

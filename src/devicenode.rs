@@ -310,7 +310,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                         let result = dir(methods.iter().copied(), request.param().into());
                         send_response(request, client_cmd_tx, Ok(result));
                     } else if let Some(handler) = node.handlers.get(method) {
-                        spawn_task(handler(request, client_cmd_tx, app_data.clone()));
+                        spawn_task(handler.0(request, client_cmd_tx, app_data.clone()));
                     } else if method == self::METH_LS {
                         let result = default_ls(request.param());
                         send_response(request, client_cmd_tx, Ok(result));
@@ -324,7 +324,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                 let shv_path = request.shv_path().unwrap_or_default().to_owned();
                 let node = node.clone();
                 spawn_task(async move {
-                    let methods = (node.methods)(shv_path, app_data.clone()).await
+                    let methods = node.methods.0(shv_path, app_data.clone()).await
                         .map_or_else(
                             Vec::new,
                             |m| DIR_LS_METHODS.iter().chain(m).collect());
@@ -335,7 +335,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                                 send_response(request, client_cmd_tx, Ok(result));
                             }
                             Some(_) =>
-                                (node.handler)(request, client_cmd_tx, app_data).await,
+                                node.handler.0(request, client_cmd_tx, app_data).await,
                             _ =>
                                 panic!("BUG: Request method should be Some after access check."),
                         };
@@ -466,8 +466,6 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
 
 #[cfg(test)]
 mod tests {
-    use crate::handler;
-
     use super::*;
 
     #[test]
@@ -507,45 +505,45 @@ mod tests {
     #[test]
     fn accept_valid_routes() {
         DeviceNode::new_static(&PROPERTY_METHODS,
-                            vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
+                            vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     fn accept_valid_routes_without_ls() {
         DeviceNode::new_static(&PROPERTY_METHODS,
-                            vec![Route::new([METH_GET, METH_SET], handler!(dummy_handler))]);
+                            vec![Route::new([METH_GET, METH_SET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
         DeviceNode::new_static(&PROPERTY_METHODS,
-                            vec![Route::new([METH_GET, METH_SET, METH_LS, SIG_CHNG], handler!(dummy_handler))]);
+                            vec![Route::new([METH_GET, METH_SET, METH_LS, SIG_CHNG], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_custom_dir_handler() {
         DeviceNode::new_static(&PROPERTY_METHODS,
-                            vec![Route::new([METH_GET, METH_SET, METH_DIR], handler!(dummy_handler))]);
+                            vec![Route::new([METH_GET, METH_SET, METH_DIR], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], handler!(dummy_handler))]);
+        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_unhandled_method() {
-        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], handler!(dummy_handler))]);
+        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_duplicate_method() {
         let duplicate_methods = PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
-        DeviceNode::new_static(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], handler!(dummy_handler))]);
+        DeviceNode::new_static(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 }

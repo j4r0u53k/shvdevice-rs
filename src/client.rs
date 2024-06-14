@@ -2,7 +2,7 @@ use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEven
 use crate::devicenode::{find_longest_prefix, process_local_dir_ls, DeviceNode, RequestResult};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
-use futures::{select, FutureExt, StreamExt};
+use futures::{select, Future, FutureExt, StreamExt};
 use log::*;
 use shv::client::ClientConfig;
 use shv::metamethod::MetaMethod;
@@ -41,8 +41,37 @@ pub enum ClientCommand {
 
 const BROKER_APP_NODE: &str = ".broker/app";
 
-pub type MethodsGetter<T> = Box<dyn Fn(String, Option<AppData<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>;
-pub type RequestHandler<T> = Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>;
+pub struct MethodsGetter<T>(pub(crate) Box<dyn Fn(String, Option<AppData<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>);
+
+impl<T> MethodsGetter<T> {
+    pub fn new<F, Fut>(func: F) -> Self
+    where
+        F: Fn(String, Option<AppData<T>>) -> Fut + Sync + Send + 'static,
+        Fut: Future<Output=Option<Vec<&'static MetaMethod>>> + Send + 'static,
+    {
+        Self(Box::new(move |path, data| Box::pin(func(path, data))))
+    }
+}
+
+pub struct RequestHandler<T>(pub(crate) Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>);
+
+impl<T> RequestHandler<T> {
+    pub fn stateful<F, Fut>(func: F) -> Self
+    where
+        F: Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> Fut + Sync + Send + 'static,
+        Fut: Future<Output=()> + Send + 'static
+    {
+        Self(Box::new(move |req, tx, data| Box::pin(func(req, tx, data))))
+    }
+
+    pub fn stateless<F, Fut>(func: F) -> Self
+    where
+        F: Fn(RpcMessage, Sender<ClientCommand>) -> Fut + Sync + Send + 'static,
+        Fut: Future<Output=()> + Send + 'static
+    {
+        Self(Box::new(move |req, tx, _data| Box::pin(func(req, tx))))
+    }
+}
 
 pub struct Route<T> {
     pub handler: RequestHandler<T>,
@@ -60,27 +89,6 @@ impl<T> Route<T> {
             methods: methods.into_iter().map(|x| x.into()).collect(),
         }
     }
-}
-
-#[macro_export]
-macro_rules! handler {
-    ($func:ident) => {
-        Box::new(move |req, tx, data| Box::pin($func(req, tx, data)))
-    };
-}
-
-#[macro_export]
-macro_rules! handler_stateless {
-    ($func:ident) => {
-        Box::new(move |req, tx, _data| Box::pin($func(req, tx)))
-    };
-}
-
-#[macro_export]
-macro_rules! methods_getter {
-    ($func:ident) => {
-        Box::new(move |path, data| Box::pin($func(path, data)))
-    };
 }
 
 #[derive(Clone)]
@@ -655,15 +663,15 @@ mod tests {
             }
             let mut client = Client::new();
             client.mount_dynamic("dynamic/sync",
-                                 methods_getter!(methods_getter),
-                                 handler_stateless!(request_handler));
+                                 MethodsGetter::new(methods_getter),
+                                 RequestHandler::stateless(request_handler));
             client.mount_dynamic("dynamic/async",
-                                 methods_getter!(methods_getter),
-                                 handler_stateless!(request_handler));
+                                 MethodsGetter::new(methods_getter),
+                                 RequestHandler::stateless(request_handler));
             client.mount_static("static",
                                 PROPERTY_METHODS.iter(),
                                 [Route::new([crate::devicenode::METH_GET, crate::devicenode::METH_SET],
-                                            handler_stateless!(request_handler))]);
+                                            RequestHandler::stateless(request_handler))]);
             client
         }
 
