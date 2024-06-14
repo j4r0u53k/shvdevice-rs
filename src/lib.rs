@@ -1,8 +1,8 @@
 pub mod appnodes;
-mod client;
+pub mod client;
 mod connection;
 mod runtime;
-mod devicenode;
+pub mod devicenode;
 pub use client::{
     AppData,
     Client,
@@ -13,15 +13,4 @@ pub use client::{
     Sender,
     MethodsGetter,
     RequestHandler,
-};
-pub use devicenode::{
-    METH_GET,
-    METH_SET,
-    METH_PING,
-    SIG_CHNG,
-    DIR_LS_METHODS,
-    PROPERTY_METHODS,
-    default_ls,
-    send_response,
-    DeviceNode,
 };

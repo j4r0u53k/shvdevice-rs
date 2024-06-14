@@ -62,7 +62,7 @@ fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -
     }
 }
 
-pub enum LsParam {
+pub(crate) enum LsParam {
     List,
     Exists(String),
 }
@@ -82,12 +82,12 @@ impl From<Option<&RpcValue>> for LsParam {
 }
 
 
-pub enum RequestResult {
+pub(crate) enum RequestResult {
     Response(RpcValue),
     Error(RpcError),
 }
 
-pub fn process_local_dir_ls<V>(
+pub(crate) fn process_local_dir_ls<V>(
     mounts: &BTreeMap<String, V>,
     frame: &RpcFrame,
 ) -> Option<RequestResult> {
@@ -154,7 +154,7 @@ fn ls_children_to_result(children: Option<Vec<String>>, param: LsParam) -> Reque
         },
     }
 }
-pub fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<Vec<String>> {
+pub(crate) fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<Vec<String>> {
     let mut dirs: Vec<String> = Vec::new();
     let mut unique_dirs: HashSet<String> = HashSet::new();
     let mut dir_exists = false;
@@ -183,7 +183,7 @@ pub fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> Option<V
 }
 
 /// Helper trait for uniform access to some common methods of BTreeMap<String, V> and HashMap<String, V>
-pub trait StringMapView<V> {
+pub(crate) trait StringMapView<V> {
     fn contains_key_(&self, key: &str) -> bool;
 }
 
@@ -199,7 +199,7 @@ impl<V> StringMapView<V> for HashMap<String, V> {
     }
 }
 
-pub fn find_longest_prefix<'a, V>(
+pub(crate) fn find_longest_prefix<'a, V>(
     map: &impl StringMapView<V>,
     shv_path: &'a str,
 ) -> Option<(&'a str, &'a str)> {
@@ -292,7 +292,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
         Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler })))
     }
 
-    pub async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
+    pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
         match &self.0 {
             NodeVariant::Static(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
