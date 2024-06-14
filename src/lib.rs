@@ -11,6 +11,8 @@ pub use client::{
     ClientEventsReceiver,
     Route,
     Sender,
+    MethodsGetter,
+    RequestHandler,
 };
 pub use devicenode::{
     METH_GET,
