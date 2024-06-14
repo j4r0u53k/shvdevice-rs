@@ -8,7 +8,7 @@ use shv::metamethod::{Flag, MetaMethod};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{app_device_node_routes, APP_DEVICE_METHODS};
-use shvclient::devicenode::SIG_CHNG;
+use shvclient::devicenode::{DeviceNode, SIG_CHNG};
 use shvclient::app_node;
 use shvclient::RequestHandler;
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
@@ -113,13 +113,6 @@ async fn delay_node_process_request(
     }
 }
 
-fn delay_node_routes() -> Vec<Route<State>> {
-    [Route::new(
-        [METH_GET_DELAYED],
-        RequestHandler::stateful(delay_node_process_request),
-    )]
-    .into()
-}
 
 async fn emit_chng_task(
     client_cmd_tx: Sender<ClientCommand>,
@@ -179,10 +172,15 @@ pub(crate) async fn main() -> shv::Result<()> {
     };
 
 
-    shvclient::Client::new()
-        .mount(".app", app_node!("simple_device_async_std"))
+    shvclient::Client::full(app_node!("simple_device_async_std"))
         .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
-        .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
+        .mount("status/delayed", DeviceNode::new_static(
+                &DELAY_METHODS,
+                [Route::new(
+                    [METH_GET_DELAYED],
+                    RequestHandler::stateful(delay_node_process_request),
+                )]
+        ))
         .with_app_data(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)

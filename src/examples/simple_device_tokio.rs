@@ -8,8 +8,7 @@ use log::*;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
-use shvclient::{MethodsGetter, RequestHandler};
-use shvclient::{app_node, appnodes::*};
+use shvclient::{app_node, MethodsGetter, RequestHandler};
 use shvclient::devicenode::{DeviceNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
@@ -185,7 +184,6 @@ pub(crate) async fn main() -> shv::Result<()> {
     async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
     }
 
-    // fn delay_node<'a>() -> DeviceNode<'a, State> {
     let delay_node = DeviceNode::new_static(
         &DELAY_METHODS,
         [Route::new(
@@ -193,10 +191,8 @@ pub(crate) async fn main() -> shv::Result<()> {
             RequestHandler::stateful(delay_node_process_request),
         )]
     );
-    // }
 
-    shvclient::Client::new()
-        .mount(".app", app_node!("simple_device_tokio"))
+    shvclient::Client::full(app_node!("simple_device_tokio"))
         // .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
         // .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
         .mount("status/delayed", delay_node)
