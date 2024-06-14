@@ -77,10 +77,10 @@ macro_rules! app_node {
                 if request.shv_path().unwrap_or_default().is_empty() {
                     let mut resp = request.prepare_response().unwrap_or_default();
                     let resp_value = match request.method() {
-                        Some(METH_SHV_VERSION_MAJOR) => Some($crate::appnodes::SHV_VERSION_MAJOR.into()),
-                        Some(METH_SHV_VERSION_MINOR) => Some($crate::appnodes::SHV_VERSION_MINOR.into()),
-                        Some(METH_NAME) => Some($crate::appnodes::RpcValue::from($appname.to_string())),
-                        Some(METH_PING) => Some(().into()),
+                        Some($crate::appnodes::METH_SHV_VERSION_MAJOR) => Some($crate::appnodes::SHV_VERSION_MAJOR.into()),
+                        Some($crate::appnodes::METH_SHV_VERSION_MINOR) => Some($crate::appnodes::SHV_VERSION_MINOR.into()),
+                        Some($crate::appnodes::METH_NAME) => Some($crate::appnodes::RpcValue::from($appname.to_string())),
+                        Some($crate::devicenode::METH_PING) => Some(().into()),
                         _ => None,
                     };
                     if let Some(val) = resp_value {
