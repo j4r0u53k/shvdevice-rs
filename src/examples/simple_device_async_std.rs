@@ -11,6 +11,7 @@ use shvclient::appnodes::{
     app_device_node_routes, app_node_routes, APP_DEVICE_METHODS, APP_METHODS,
 };
 use shvclient::SIG_CHNG;
+use shvclient::RequestHandler;
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
 
@@ -116,7 +117,7 @@ async fn delay_node_process_request(
 fn delay_node_routes() -> Vec<Route<State>> {
     [Route::new(
         [METH_GET_DELAYED],
-        shvclient::handler!(delay_node_process_request),
+        RequestHandler::stateful(delay_node_process_request),
     )]
     .into()
 }
