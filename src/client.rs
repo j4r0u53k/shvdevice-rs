@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::devicenode::{find_longest_prefix, process_local_dir_ls, DeviceNode, RequestResult};
+use crate::clientnode::{find_longest_prefix, process_local_dir_ls, ClientNode, RequestResult};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
@@ -161,7 +161,7 @@ impl Feature for Full { }
 impl private::Sealed for Full { }
 
 pub struct Client<T, F: Feature> {
-    mounts: BTreeMap<String, DeviceNode<'static, T>>,
+    mounts: BTreeMap<String, ClientNode<'static, T>>,
     app_data: Option<AppData<T>>,
     feature: PhantomData<F>,
 }
@@ -181,18 +181,18 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
     // pub fn full(app_node: DeviceNode<'static, T>) -> Self {
     pub fn full<N>(app_node: N) -> Self
     where
-        N: crate::devicenode::ConstantNode + 'static,
+        N: crate::clientnode::ConstantNode + 'static,
     {
         let mut client = Self {
             mounts: Default::default(),
             app_data: Default::default(),
             feature: PhantomData,
         };
-        client.mount(".app", DeviceNode::constant(app_node));
+        client.mount(".app", ClientNode::constant(app_node));
         client
     }
 
-    pub fn mount<P: Into<String>>(&mut self, path: P, node: DeviceNode<'static, T>) -> &mut Self {
+    pub fn mount<P: Into<String>>(&mut self, path: P, node: ClientNode<'static, T>) -> &mut Self {
         self.mounts.insert(path.into(), node);
         self
     }
@@ -203,7 +203,7 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
         M: IntoIterator<Item = &'static MetaMethod>,
         R: IntoIterator<Item = Route<T>>,
     {
-        self.mounts.insert(path.into(), DeviceNode::steady(defined_methods, routes));
+        self.mounts.insert(path.into(), ClientNode::steady(defined_methods, routes));
         self
     }
 
@@ -211,7 +211,7 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
     where
         P: Into<String>,
     {
-        self.mounts.insert(path.into(), DeviceNode::dynamic(methods_getter, request_handler));
+        self.mounts.insert(path.into(), ClientNode::dynamic(methods_getter, request_handler));
         self
     }
 }
@@ -464,7 +464,7 @@ mod tests {
         use crate::appnodes::AppNode;
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
-        use crate::devicenode::{SIG_CHNG, PROPERTY_METHODS};
+        use crate::clientnode::{SIG_CHNG, PROPERTY_METHODS};
         use shv::metamethod::AccessLevel;
 
         struct ConnectionMock {
@@ -684,13 +684,13 @@ mod tests {
             async fn request_handler(rq: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
                 let mut resp = rq.prepare_response().unwrap();
                 match rq.method() {
-                    Some(crate::devicenode::METH_LS) => {
+                    Some(crate::clientnode::METH_LS) => {
                         resp.set_result("ls");
                     },
-                    Some(crate::devicenode::METH_GET) => {
+                    Some(crate::clientnode::METH_GET) => {
                         resp.set_result("get");
                     },
-                    Some(crate::devicenode::METH_SET) => {
+                    Some(crate::clientnode::METH_SET) => {
                         resp.set_result("set");
                     },
                     _ => {
@@ -711,7 +711,7 @@ mod tests {
                                  RequestHandler::stateless(request_handler));
             client.mount_steady("static",
                                 PROPERTY_METHODS.iter(),
-                                [Route::new([crate::devicenode::METH_GET, crate::devicenode::METH_SET],
+                                [Route::new([crate::clientnode::METH_GET, crate::clientnode::METH_SET],
                                             RequestHandler::stateless(request_handler))]);
             client
         }

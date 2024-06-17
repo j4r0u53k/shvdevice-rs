@@ -281,15 +281,18 @@ pub trait ConstantNode {
     fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, RpcError>>;
 }
 
+// NOTE: Implementing Steady and Dynamic nodes using async trait would allow to
+// remove Constant variant. Steady node would have only one handler for the whole node.
+
 enum NodeVariant<'a, T> {
     Steady(SteadyNode<'a, T>),
     Dynamic(Arc<DynamicNode<T>>),
     Constant(Box<dyn ConstantNode>),
 }
 
-pub struct DeviceNode<'a, T>(NodeVariant<'a, T>);
+pub struct ClientNode<'a, T>(NodeVariant<'a, T>);
 
-impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
+impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
     pub fn steady(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
         Self(NodeVariant::Steady(SteadyNode::new(methods, routes)))
     }
@@ -298,7 +301,10 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
         Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler })))
     }
 
-    pub fn constant<N>(node: N) -> Self
+    // NOTE: Not included in the public API. Constant nodes are meant
+    // for implementation of special nodes like .app and .device and
+    // should not be needed outside of the library.
+    pub(crate) fn constant<N>(node: N) -> Self
     where
         N: ConstantNode + 'static,
     {
@@ -542,46 +548,46 @@ mod tests {
 
     #[test]
     fn accept_valid_routes() {
-        DeviceNode::steady(&PROPERTY_METHODS,
+        ClientNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     fn accept_valid_routes_without_ls() {
-        DeviceNode::steady(&PROPERTY_METHODS,
+        ClientNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
-        DeviceNode::steady(&PROPERTY_METHODS,
+        ClientNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS, SIG_CHNG], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_custom_dir_handler() {
-        DeviceNode::steady(&PROPERTY_METHODS,
+        ClientNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_DIR], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        DeviceNode::steady(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
+        ClientNode::steady(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_unhandled_method() {
-        DeviceNode::steady(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
+        ClientNode::steady(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_duplicate_method() {
         let duplicate_methods = PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
-        DeviceNode::steady(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
+        ClientNode::steady(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 }

@@ -2,7 +2,7 @@ pub mod appnodes;
 pub mod client;
 mod connection;
 mod runtime;
-pub mod devicenode;
+pub mod clientnode;
 pub use client::{
     AppData,
     Client,

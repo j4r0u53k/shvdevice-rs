@@ -1,5 +1,5 @@
 use crate::runtime::{current_task_runtime, Runtime};
-use crate::devicenode::METH_PING;
+use crate::clientnode::METH_PING;
 pub use crate::Sender;
 use duration_str::parse;
 use futures::{select, Future, FutureExt, StreamExt};

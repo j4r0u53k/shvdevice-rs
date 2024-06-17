@@ -10,7 +10,7 @@ use shv::metamethod::{Flag, MetaMethod};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::{MethodsGetter, RequestHandler};
-use shvclient::devicenode::{DeviceNode, PROPERTY_METHODS, SIG_CHNG};
+use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
 
@@ -185,7 +185,7 @@ pub(crate) async fn main() -> shv::Result<()> {
     async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
     }
 
-    let delay_node = DeviceNode::steady(
+    let delay_node = ClientNode::steady(
         &DELAY_METHODS,
         [Route::new(
             [METH_GET_DELAYED],
@@ -198,7 +198,7 @@ pub(crate) async fn main() -> shv::Result<()> {
         // .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
         // .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
         .mount("status/delayed", delay_node)
-        .mount("status/dyn", DeviceNode::dynamic(
+        .mount("status/dyn", ClientNode::dynamic(
                 MethodsGetter::new(dyn_methods_getter),
                 RequestHandler::stateless(dyn_handler)))
         .with_app_data(cnt)

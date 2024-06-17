@@ -1,5 +1,5 @@
 
-use crate::devicenode::{ConstantNode, METH_PING};
+use crate::clientnode::{ConstantNode, METH_PING};
 use crate::client::{ClientCommand, RequestHandler, Route, Sender};
 use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};
@@ -42,7 +42,7 @@ impl ConstantNode for AppNode {
             Some(crate::appnodes::METH_SHV_VERSION_MAJOR) => Some(self.shv_version_major.into()),
             Some(crate::appnodes::METH_SHV_VERSION_MINOR) => Some(self.shv_version_minor.into()),
             Some(crate::appnodes::METH_NAME) => Some(RpcValue::from(&self.app_name)),
-            Some(crate::devicenode::METH_PING) => Some(().into()),
+            Some(crate::clientnode::METH_PING) => Some(().into()),
             _ => None,
         }.map(Ok)
     }
@@ -94,7 +94,7 @@ macro_rules! app_node {
                         Some($crate::appnodes::METH_SHV_VERSION_MAJOR) => Some($crate::appnodes::SHV_VERSION_MAJOR.into()),
                         Some($crate::appnodes::METH_SHV_VERSION_MINOR) => Some($crate::appnodes::SHV_VERSION_MINOR.into()),
                         Some($crate::appnodes::METH_NAME) => Some($crate::appnodes::RpcValue::from($appname.to_string())),
-                        Some($crate::devicenode::METH_PING) => Some(().into()),
+                        Some($crate::clientnode::METH_PING) => Some(().into()),
                         _ => None,
                     };
                     if let Some(val) = resp_value {
@@ -105,14 +105,14 @@ macro_rules! app_node {
                     }
                 }
             }
-            $crate::devicenode::DeviceNode::new_static(
+            $crate::clientnode::DeviceNode::new_static(
                 &$crate::appnodes::APP_METHODS,
                 [$crate::client::Route::new(
                     [
                     $crate::appnodes::METH_SHV_VERSION_MAJOR,
                     $crate::appnodes::METH_SHV_VERSION_MINOR,
                     $crate::appnodes::METH_NAME,
-                    $crate::devicenode::METH_PING,
+                    $crate::clientnode::METH_PING,
                     ],
                     $crate::RequestHandler::stateless(process_request)
                 )]
