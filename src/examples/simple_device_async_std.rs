@@ -173,8 +173,8 @@ pub(crate) async fn main() -> shv::Result<()> {
 
     // shvclient::Client::full(app_node!("simple_device_async_std"))
     shvclient::Client::full(AppNode::new("simple_device_async_std"))
-        .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
-        .mount("status/delayed", DeviceNode::new_static(
+        .mount_steady(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
+        .mount("status/delayed", DeviceNode::steady(
                 &DELAY_METHODS,
                 [Route::new(
                     [METH_GET_DELAYED],

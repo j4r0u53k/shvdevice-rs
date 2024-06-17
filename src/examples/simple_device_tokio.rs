@@ -185,7 +185,7 @@ pub(crate) async fn main() -> shv::Result<()> {
     async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
     }
 
-    let delay_node = DeviceNode::new_static(
+    let delay_node = DeviceNode::steady(
         &DELAY_METHODS,
         [Route::new(
             [METH_GET_DELAYED],
@@ -198,7 +198,7 @@ pub(crate) async fn main() -> shv::Result<()> {
         // .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
         // .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
         .mount("status/delayed", delay_node)
-        .mount("status/dyn", DeviceNode::new_dynamic(
+        .mount("status/dyn", DeviceNode::dynamic(
                 MethodsGetter::new(dyn_methods_getter),
                 RequestHandler::stateless(dyn_handler)))
         .with_app_data(cnt)

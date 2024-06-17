@@ -225,12 +225,12 @@ pub(crate) fn find_longest_prefix<'a, V>(
 
 type StaticNodeHandlers<T> = BTreeMap<String, Rc<RequestHandler<T>>>;
 
-struct StaticNode<'a, T> {
+struct SteadyNode<'a, T> {
     methods: Vec<&'a MetaMethod>,
     handlers: StaticNodeHandlers<T>,
 }
 
-impl<'a, T> StaticNode<'a, T> {
+impl<'a, T> SteadyNode<'a, T> {
     fn new(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
         let methods = DIR_LS_METHODS.iter().chain(methods).collect::<Vec<&MetaMethod>>();
         let handlers = Self::add_routes(&methods, routes);
@@ -276,38 +276,38 @@ struct DynamicNode<T> {
     handler: RequestHandler<T>,
 }
 
-pub trait StandaloneNode {
+pub trait ConstantNode {
     fn methods(&self) -> Vec<&MetaMethod>;
     fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, RpcError>>;
 }
 
 enum NodeVariant<'a, T> {
-    Static(StaticNode<'a, T>),
+    Steady(SteadyNode<'a, T>),
     Dynamic(Arc<DynamicNode<T>>),
-    Standalone(Box<dyn StandaloneNode>),
+    Constant(Box<dyn ConstantNode>),
 }
 
 pub struct DeviceNode<'a, T>(NodeVariant<'a, T>);
 
 impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
-    pub fn new_static(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
-        Self(NodeVariant::Static(StaticNode::new(methods, routes)))
+    pub fn steady(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
+        Self(NodeVariant::Steady(SteadyNode::new(methods, routes)))
     }
 
-    pub fn new_dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
+    pub fn dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
         Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler })))
     }
 
-    pub fn new_standalone<N>(node: N) -> Self
+    pub fn constant<N>(node: N) -> Self
     where
-        N: StandaloneNode + 'static,
+        N: ConstantNode + 'static,
     {
-        Self(NodeVariant::Standalone(Box::new(node)))
+        Self(NodeVariant::Constant(Box::new(node)))
     }
 
     pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
         match &self.0 {
-            NodeVariant::Static(node) => {
+            NodeVariant::Steady(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
                     node.methods.as_slice()
                 } else {
@@ -355,7 +355,7 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                     }
                 });
             },
-            NodeVariant::Standalone(node) => {
+            NodeVariant::Constant(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
                     DIR_LS_METHODS.iter().chain(node.methods()).collect()
                 } else {
@@ -542,46 +542,46 @@ mod tests {
 
     #[test]
     fn accept_valid_routes() {
-        DeviceNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     fn accept_valid_routes_without_ls() {
-        DeviceNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
-        DeviceNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS, SIG_CHNG], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_custom_dir_handler() {
-        DeviceNode::new_static(&PROPERTY_METHODS,
+        DeviceNode::steady(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_DIR], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
+        DeviceNode::steady(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_unhandled_method() {
-        DeviceNode::new_static(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
+        DeviceNode::steady(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_duplicate_method() {
         let duplicate_methods = PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
-        DeviceNode::new_static(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
+        DeviceNode::steady(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 }

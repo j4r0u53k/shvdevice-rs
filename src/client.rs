@@ -181,14 +181,14 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
     // pub fn full(app_node: DeviceNode<'static, T>) -> Self {
     pub fn full<N>(app_node: N) -> Self
     where
-        N: crate::devicenode::StandaloneNode + 'static,
+        N: crate::devicenode::ConstantNode + 'static,
     {
         let mut client = Self {
             mounts: Default::default(),
             app_data: Default::default(),
             feature: PhantomData,
         };
-        client.mount(".app", DeviceNode::new_standalone(app_node));
+        client.mount(".app", DeviceNode::constant(app_node));
         client
     }
 
@@ -197,13 +197,13 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
         self
     }
 
-    pub fn mount_static<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
+    pub fn mount_steady<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
     where
         P: Into<String>,
         M: IntoIterator<Item = &'static MetaMethod>,
         R: IntoIterator<Item = Route<T>>,
     {
-        self.mounts.insert(path.into(), DeviceNode::new_static(defined_methods, routes));
+        self.mounts.insert(path.into(), DeviceNode::steady(defined_methods, routes));
         self
     }
 
@@ -211,7 +211,7 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
     where
         P: Into<String>,
     {
-        self.mounts.insert(path.into(), DeviceNode::new_dynamic(methods_getter, request_handler));
+        self.mounts.insert(path.into(), DeviceNode::dynamic(methods_getter, request_handler));
         self
     }
 }
@@ -709,7 +709,7 @@ mod tests {
             client.mount_dynamic("dynamic/async",
                                  MethodsGetter::new(methods_getter),
                                  RequestHandler::stateless(request_handler));
-            client.mount_static("static",
+            client.mount_steady("static",
                                 PROPERTY_METHODS.iter(),
                                 [Route::new([crate::devicenode::METH_GET, crate::devicenode::METH_SET],
                                             RequestHandler::stateless(request_handler))]);

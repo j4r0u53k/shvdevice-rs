@@ -1,5 +1,5 @@
 
-use crate::devicenode::{StandaloneNode, METH_PING};
+use crate::devicenode::{ConstantNode, METH_PING};
 use crate::client::{ClientCommand, RequestHandler, Route, Sender};
 use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};
@@ -32,7 +32,7 @@ impl AppNode {
     }
 }
 
-impl StandaloneNode for AppNode {
+impl ConstantNode for AppNode {
     fn methods(&self) -> Vec<&MetaMethod> {
         APP_METHODS.iter().collect()
     }
