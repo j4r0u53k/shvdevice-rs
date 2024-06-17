@@ -18,7 +18,7 @@ path = "src/examples/simple_device_async_std.rs"
 required-features = ["async_std"]
 
 [dependencies]
-shv = { git = "https://github.com/silicon-heaven/shv-rs.git", rev = "aa8d0932beac" }
+shv = { git = "https://github.com/silicon-heaven/shv-rs.git", rev = "0202268d05d7" }
 # shv = { path = "../shv-rs" }
 futures = "0.3.29"
 async-std = { version = "1.12.0", features = ["attributes"], optional = true }
