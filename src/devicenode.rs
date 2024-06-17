@@ -276,9 +276,15 @@ struct DynamicNode<T> {
     handler: RequestHandler<T>,
 }
 
+pub trait StandaloneNode {
+    fn methods(&self) -> Vec<&MetaMethod>;
+    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, RpcError>>;
+}
+
 enum NodeVariant<'a, T> {
     Static(StaticNode<'a, T>),
     Dynamic(Arc<DynamicNode<T>>),
+    Standalone(Box<dyn StandaloneNode>),
 }
 
 pub struct DeviceNode<'a, T>(NodeVariant<'a, T>);
@@ -290,6 +296,13 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
 
     pub fn new_dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
         Self(NodeVariant::Dynamic(Arc::new(DynamicNode { methods, handler })))
+    }
+
+    pub fn new_standalone<N>(node: N) -> Self
+    where
+        N: StandaloneNode + 'static,
+    {
+        Self(NodeVariant::Standalone(Box::new(node)))
     }
 
     pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
@@ -341,7 +354,32 @@ impl<'a, T: Sync + Send + 'static> DeviceNode<'a, T> {
                         };
                     }
                 });
-            }
+            },
+            NodeVariant::Standalone(node) => {
+                let methods = if request.shv_path().unwrap_or_default().is_empty() {
+                    DIR_LS_METHODS.iter().chain(node.methods()).collect()
+                } else {
+                    // Static nodes do not have any own children. Any child nodes are
+                    // resolved on the mounts tree level in `process_local_dir_ls()`.
+                    vec![]
+                };
+                if resolve_request_access(&request, &mount_path, &client_cmd_tx, &methods) {
+                    let Some(method) = request.method() else {
+                        panic!("BUG: Request method should be Some after access check.");
+                    };
+                    if method == self::METH_DIR {
+                        let result = dir(methods.iter().copied(), request.param().into());
+                        send_response(request, client_cmd_tx, Ok(result));
+                    } else if let Some(result) = node.process_request(&request) {
+                        send_response(request, client_cmd_tx, result);
+                    } else if method == self::METH_LS {
+                        let result = default_ls(request.param());
+                        send_response(request, client_cmd_tx, Ok(result));
+                    } else {
+                        panic!("BUG: Unhandled method '{mount_path}:{method}()' should have been caught in the node constructor");
+                    }
+                }
+            },
         }
     }
 }

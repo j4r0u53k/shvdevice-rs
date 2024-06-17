@@ -1,5 +1,5 @@
 
-use crate::devicenode::METH_PING;
+use crate::devicenode::{StandaloneNode, METH_PING};
 use crate::client::{ClientCommand, RequestHandler, Route, Sender};
 use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};
@@ -16,23 +16,37 @@ pub const METH_SERIAL_NUMBER: &str = "serialNumber";
 pub const SHV_VERSION_MAJOR: i32 = 3;
 pub const SHV_VERSION_MINOR: i32 = 0;
 
-// TODO: Use for future implementation of standalone (info) nodes
+pub struct AppNode {
+    app_name: String,
+    shv_version_major: i32,
+    shv_version_minor: i32,
+}
 
-// struct AppNode {
-//     app_name: String,
-//     shv_version_major: i32,
-//     shv_version_minor: i32,
-// }
-//
-// impl AppNode {
-//     pub fn new(app_name: impl Into<String>) -> Self {
-//         Self {
-//             app_name: app_name.into(),
-//             shv_version_major: SHV_VERSION_MAJOR,
-//             shv_version_minor: SHV_VERSION_MINOR,
-//         }
-//     }
-// }
+impl AppNode {
+    pub fn new(app_name: impl Into<String>) -> Self {
+        Self {
+            app_name: app_name.into(),
+            shv_version_major: SHV_VERSION_MAJOR,
+            shv_version_minor: SHV_VERSION_MINOR,
+        }
+    }
+}
+
+impl StandaloneNode for AppNode {
+    fn methods(&self) -> Vec<&MetaMethod> {
+        APP_METHODS.iter().collect()
+    }
+
+    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, shv::rpcmessage::RpcError>> {
+        match request.method() {
+            Some(crate::appnodes::METH_SHV_VERSION_MAJOR) => Some(self.shv_version_major.into()),
+            Some(crate::appnodes::METH_SHV_VERSION_MINOR) => Some(self.shv_version_minor.into()),
+            Some(crate::appnodes::METH_NAME) => Some(RpcValue::from(&self.app_name)),
+            Some(crate::devicenode::METH_PING) => Some(().into()),
+            _ => None,
+        }.map(Ok)
+    }
+}
 
 pub const APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {

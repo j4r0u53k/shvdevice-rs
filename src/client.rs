@@ -178,13 +178,17 @@ impl<T: Send + Sync + 'static> Client<T, Bare> {
 }
 
 impl<T: Send + Sync + 'static> Client<T, Full> {
-    pub fn full(app_node: DeviceNode<'static, T>) -> Self {
+    // pub fn full(app_node: DeviceNode<'static, T>) -> Self {
+    pub fn full<N>(app_node: N) -> Self
+    where
+        N: crate::devicenode::StandaloneNode + 'static,
+    {
         let mut client = Self {
             mounts: Default::default(),
             app_data: Default::default(),
             feature: PhantomData,
         };
-        client.mount(".app", app_node);
+        client.mount(".app", DeviceNode::new_standalone(app_node));
         client
     }
 
@@ -456,7 +460,8 @@ mod tests {
 
     pub mod drivers {
         use super::*;
-        use crate::app_node;
+        // use crate::app_node;
+        use crate::appnodes::AppNode;
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
         use crate::devicenode::{SIG_CHNG, PROPERTY_METHODS};
@@ -696,7 +701,8 @@ mod tests {
                 }
                 client_cmd_tx.unbounded_send(ClientCommand::SendMessage{ message: resp }).unwrap();
             }
-            let mut client = Client::full(app_node!("test"));
+            // let mut client = Client::full(app_node!("test"));
+            let mut client = Client::full(AppNode::new("test"));
             client.mount_dynamic("dynamic/sync",
                                  MethodsGetter::new(methods_getter),
                                  RequestHandler::stateless(request_handler));
@@ -836,7 +842,8 @@ mod tests {
     #[cfg(feature = "tokio")]
     pub mod tokio {
         use super::*;
-        use crate::app_node;
+        // use crate::app_node;
+        use crate::appnodes::AppNode;
         use super::drivers::make_client_with_handlers;
 
         def_test!(receive_connected_and_disconnected_events);
@@ -854,7 +861,8 @@ mod tests {
             let mut client = if let Some(client) = custom_client {
                 client
             } else {
-                Client::full(app_node!("test"))
+                // Client::full(app_node!("test"))
+                Client::full(AppNode::new("test"))
             };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
@@ -878,7 +886,8 @@ mod tests {
 
     #[cfg(feature = "async_std")]
     pub mod async_std {
-        use crate::app_node;
+        // use crate::app_node;
+        use crate::appnodes::AppNode;
         use super::*;
         use super::drivers::make_client_with_handlers;
 
@@ -897,7 +906,8 @@ mod tests {
             let mut client = if let Some(client) = custom_client {
                 client
             } else {
-                Client::full(app_node!("test"))
+                // Client::full(app_node!("test"))
+                Client::full(AppNode::new("test"))
             };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();

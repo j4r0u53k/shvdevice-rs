@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use shvclient::appnodes::AppNode;
 use tokio::sync::RwLock;
 
 use clap::Parser;
@@ -8,7 +9,7 @@ use log::*;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
-use shvclient::{app_node, MethodsGetter, RequestHandler};
+use shvclient::{MethodsGetter, RequestHandler};
 use shvclient::devicenode::{DeviceNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
@@ -192,7 +193,8 @@ pub(crate) async fn main() -> shv::Result<()> {
         )]
     );
 
-    shvclient::Client::full(app_node!("simple_device_tokio"))
+    // shvclient::Client::full(app_node!("simple_device_tokio"))
+    shvclient::Client::full(AppNode::new("simple_device_tokio"))
         // .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
         // .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
         .mount("status/delayed", delay_node)
