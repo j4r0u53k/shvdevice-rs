@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use shvclient::appnodes::AppNode;
+use shvclient::appnodes::DotAppNode;
 use tokio::sync::RwLock;
 
 use clap::Parser;
@@ -112,15 +112,6 @@ async fn delay_node_process_request(
     }
 }
 
-// fn delay_node_routes() -> Vec<Route<State>> {
-//     [Route::new(
-//         [METH_GET_DELAYED],
-//         shvclient::handler!(delay_node_process_request),
-//     )]
-//     .into()
-// }
-
-
 async fn emit_chng_task(
     client_cmd_tx: Sender<ClientCommand>,
     mut client_evt_rx: ClientEventsReceiver,
@@ -193,10 +184,7 @@ pub(crate) async fn main() -> shv::Result<()> {
         )]
     );
 
-    // shvclient::Client::full(app_node!("simple_device_tokio"))
-    shvclient::Client::full(AppNode::new("simple_device_tokio"))
-        // .mount_static(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
-        // .mount_static("status/delayed", &DELAY_METHODS, delay_node_routes())
+    shvclient::Client::new(DotAppNode::new("simple_device_tokio"))
         .mount("status/delayed", delay_node)
         .mount("status/dyn", ClientNode::dynamic(
                 MethodsGetter::new(dyn_methods_getter),

@@ -7,7 +7,7 @@ use log::*;
 use shv::metamethod::{Flag, MetaMethod};
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
-use shvclient::appnodes::{app_device_node_routes, AppNode, APP_DEVICE_METHODS};
+use shvclient::appnodes::{DotAppNode, DotDeviceNode};
 use shvclient::clientnode::{ClientNode, SIG_CHNG};
 use shvclient::RequestHandler;
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
@@ -170,10 +170,7 @@ pub(crate) async fn main() -> shv::Result<()> {
         async_std::task::spawn(emit_chng_task(client_cmd_tx, client_evt_rx, counter));
     };
 
-
-    // shvclient::Client::full(app_node!("simple_device_async_std"))
-    shvclient::Client::full(AppNode::new("simple_device_async_std"))
-        .mount_steady(".app/device", &APP_DEVICE_METHODS, app_device_node_routes())
+    shvclient::Client::new_device(DotAppNode::new("simple_device_async_std"), DotDeviceNode::new("simple_device", "0.1", Some("00000".into())))
         .mount("status/delayed", ClientNode::steady(
                 &DELAY_METHODS,
                 [Route::new(

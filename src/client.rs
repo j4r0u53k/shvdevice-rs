@@ -10,7 +10,6 @@ use shv::rpcframe::RpcFrame;
 use shv::rpcmessage::{RpcError, RpcErrorCode};
 use shv::{make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
 use std::collections::{BTreeMap, HashMap};
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -146,49 +145,24 @@ impl<T: ?Sized> From<Arc<T>> for AppData<T> {
     }
 }
 
-mod private {
-    pub trait Sealed { }
-}
-
-pub trait Feature: private::Sealed { }
-
-pub enum Bare { }
-impl Feature for Bare { }
-impl private::Sealed for Bare { }
-
-pub enum Full { }
-impl Feature for Full { }
-impl private::Sealed for Full { }
-
-pub struct Client<T, F: Feature> {
+pub struct Client<T> {
     mounts: BTreeMap<String, ClientNode<'static, T>>,
     app_data: Option<AppData<T>>,
-    feature: PhantomData<F>,
 }
 
-
-impl<T: Send + Sync + 'static> Client<T, Bare> {
-    pub fn bare() -> Self {
-        Self {
-            mounts: Default::default(),
-            app_data: Default::default(),
-            feature: PhantomData,
-        }
-    }
-}
-
-impl<T: Send + Sync + 'static> Client<T, Full> {
-    // pub fn full(app_node: DeviceNode<'static, T>) -> Self {
-    pub fn full<N>(app_node: N) -> Self
-    where
-        N: crate::clientnode::ConstantNode + 'static,
-    {
+impl<T: Send + Sync + 'static> Client<T> {
+    pub fn new(app_node: crate::appnodes::DotAppNode) -> Self {
         let mut client = Self {
             mounts: Default::default(),
             app_data: Default::default(),
-            feature: PhantomData,
         };
         client.mount(".app", ClientNode::constant(app_node));
+        client
+    }
+
+    pub fn new_device(app_node: crate::appnodes::DotAppNode, device_node: crate::appnodes::DotDeviceNode) -> Self {
+        let mut client = Self::new(app_node);
+        client.mount(".device", ClientNode::constant(device_node));
         client
     }
 
@@ -214,9 +188,7 @@ impl<T: Send + Sync + 'static> Client<T, Full> {
         self.mounts.insert(path.into(), ClientNode::dynamic(methods_getter, request_handler));
         self
     }
-}
 
-impl<T: Send + Sync + 'static, F: Feature> Client<T, F> {
     pub fn with_app_data(&mut self, app_data: AppData<T>) -> &mut Self {
         self.app_data = Some(app_data);
         self
@@ -460,8 +432,7 @@ mod tests {
 
     pub mod drivers {
         use super::*;
-        // use crate::app_node;
-        use crate::appnodes::AppNode;
+        use crate::appnodes::DotAppNode;
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
         use crate::clientnode::{SIG_CHNG, PROPERTY_METHODS};
@@ -673,7 +644,7 @@ mod tests {
 
         // Request handling tests
         //
-        pub fn make_client_with_handlers() -> Client<(), Full> {
+        pub fn make_client_with_handlers() -> Client<()> {
             async fn methods_getter(path: String, _: Option<AppData<()>>) -> Option<Vec<&'static MetaMethod>> {
                 if path.is_empty() {
                     Some(PROPERTY_METHODS.iter().collect())
@@ -681,6 +652,7 @@ mod tests {
                     None
                 }
             }
+
             async fn request_handler(rq: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
                 let mut resp = rq.prepare_response().unwrap();
                 match rq.method() {
@@ -701,8 +673,8 @@ mod tests {
                 }
                 client_cmd_tx.unbounded_send(ClientCommand::SendMessage{ message: resp }).unwrap();
             }
-            // let mut client = Client::full(app_node!("test"));
-            let mut client = Client::full(AppNode::new("test"));
+
+            let mut client = Client::new(DotAppNode::new("test"));
             client.mount_dynamic("dynamic/sync",
                                  MethodsGetter::new(methods_getter),
                                  RequestHandler::stateless(request_handler));
@@ -818,7 +790,7 @@ mod tests {
             mk_test_fn!($name [ $(#[$attr])* ] Some($client));
         };
         ($name:ident [ $(#[$attr:meta])* ] ) => {
-            mk_test_fn!($name [ $(#[$attr])* ] None::<$crate::Client<(), Full>>);
+            mk_test_fn!($name [ $(#[$attr])* ] None::<$crate::Client<()>>);
         };
     }
 
@@ -843,7 +815,7 @@ mod tests {
     pub mod tokio {
         use super::*;
         // use crate::app_node;
-        use crate::appnodes::AppNode;
+        use crate::appnodes::DotAppNode;
         use super::drivers::make_client_with_handlers;
 
         def_test!(receive_connected_and_disconnected_events);
@@ -857,12 +829,11 @@ mod tests {
         def_test!(handle_method_calls, make_client_with_handlers());
 
         #[generics(TestDriverBounds)]
-        async fn init_client(test_drv: C, custom_client: Option<Client<S, Full>>) {
+        async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
             let mut client = if let Some(client) = custom_client {
                 client
             } else {
-                // Client::full(app_node!("test"))
-                Client::full(AppNode::new("test"))
+                Client::new(DotAppNode::new("test"))
             };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
@@ -876,7 +847,7 @@ mod tests {
         }
 
         #[generics(TestDriverBounds)]
-        pub fn run_test(test_drv: C, custom_client: Option<Client<S, Full>>) {
+        pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
             ::tokio::runtime::Builder::new_multi_thread()
                 .build()
                 .unwrap()
@@ -887,7 +858,7 @@ mod tests {
     #[cfg(feature = "async_std")]
     pub mod async_std {
         // use crate::app_node;
-        use crate::appnodes::AppNode;
+        use crate::appnodes::DotAppNode;
         use super::*;
         use super::drivers::make_client_with_handlers;
 
@@ -902,12 +873,11 @@ mod tests {
         def_test!(handle_method_calls, make_client_with_handlers());
 
         #[generics(TestDriverBounds)]
-        async fn init_client(test_drv: C, custom_client: Option<Client<S, Full>>) {
+        async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
             let mut client = if let Some(client) = custom_client {
                 client
             } else {
-                // Client::full(app_node!("test"))
-                Client::full(AppNode::new("test"))
+                Client::new(DotAppNode::new("test"))
             };
             let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
             let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
@@ -921,7 +891,7 @@ mod tests {
         }
 
         #[generics(TestDriverBounds)]
-        pub fn run_test(test_drv: C, custom_client: Option<Client<S, Full>>) {
+        pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
             ::async_std::task::block_on(init_client(test_drv, custom_client));
         }
     }

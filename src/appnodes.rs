@@ -1,54 +1,18 @@
 
 use crate::clientnode::{ConstantNode, METH_PING};
-use crate::client::{ClientCommand, RequestHandler, Route, Sender};
-use log::error;
 use shv::metamethod::{AccessLevel, Flag, MetaMethod};
-use shv::{RpcMessageMetaTags, RpcMessage};
+use shv::{RpcMessageMetaTags, RpcMessage, RpcValue};
 
-pub use shv::RpcValue;
+const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
+const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
+const METH_NAME: &str = "name";
+const METH_VERSION: &str = "version";
+const METH_SERIAL_NUMBER: &str = "serialNumber";
 
-pub const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
-pub const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
-pub const METH_NAME: &str = "name";
-pub const METH_VERSION: &str = "version";
-pub const METH_SERIAL_NUMBER: &str = "serialNumber";
+const SHV_VERSION_MAJOR: i32 = 3;
+const SHV_VERSION_MINOR: i32 = 0;
 
-pub const SHV_VERSION_MAJOR: i32 = 3;
-pub const SHV_VERSION_MINOR: i32 = 0;
-
-pub struct AppNode {
-    app_name: String,
-    shv_version_major: i32,
-    shv_version_minor: i32,
-}
-
-impl AppNode {
-    pub fn new(app_name: impl Into<String>) -> Self {
-        Self {
-            app_name: app_name.into(),
-            shv_version_major: SHV_VERSION_MAJOR,
-            shv_version_minor: SHV_VERSION_MINOR,
-        }
-    }
-}
-
-impl ConstantNode for AppNode {
-    fn methods(&self) -> Vec<&MetaMethod> {
-        APP_METHODS.iter().collect()
-    }
-
-    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, shv::rpcmessage::RpcError>> {
-        match request.method() {
-            Some(crate::appnodes::METH_SHV_VERSION_MAJOR) => Some(self.shv_version_major.into()),
-            Some(crate::appnodes::METH_SHV_VERSION_MINOR) => Some(self.shv_version_minor.into()),
-            Some(crate::appnodes::METH_NAME) => Some(RpcValue::from(&self.app_name)),
-            Some(crate::clientnode::METH_PING) => Some(().into()),
-            _ => None,
-        }.map(Ok)
-    }
-}
-
-pub const APP_METHODS: [MetaMethod; 4] = [
+const DOT_APP_METHODS: [MetaMethod; 4] = [
     MetaMethod {
         name: METH_SHV_VERSION_MAJOR,
         flags: Flag::IsGetter as u32,
@@ -83,53 +47,39 @@ pub const APP_METHODS: [MetaMethod; 4] = [
     },
 ];
 
-#[macro_export]
-macro_rules! app_node {
-    ($appname:literal) => {
-        {
-            async fn process_request(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
-                if request.shv_path().unwrap_or_default().is_empty() {
-                    let mut resp = request.prepare_response().unwrap_or_default();
-                    let resp_value = match request.method() {
-                        Some($crate::appnodes::METH_SHV_VERSION_MAJOR) => Some($crate::appnodes::SHV_VERSION_MAJOR.into()),
-                        Some($crate::appnodes::METH_SHV_VERSION_MINOR) => Some($crate::appnodes::SHV_VERSION_MINOR.into()),
-                        Some($crate::appnodes::METH_NAME) => Some($crate::appnodes::RpcValue::from($appname.to_string())),
-                        Some($crate::clientnode::METH_PING) => Some(().into()),
-                        _ => None,
-                    };
-                    if let Some(val) = resp_value {
-                        resp.set_result(val);
-                        if let Err(e) = client_cmd_tx.unbounded_send($crate::client::ClientCommand::SendMessage { message: resp }) {
-                            error!("app_node_process_request: Cannot send response ({e})");
-                        }
-                    }
-                }
-            }
-            $crate::clientnode::DeviceNode::new_static(
-                &$crate::appnodes::APP_METHODS,
-                [$crate::client::Route::new(
-                    [
-                    $crate::appnodes::METH_SHV_VERSION_MAJOR,
-                    $crate::appnodes::METH_SHV_VERSION_MINOR,
-                    $crate::appnodes::METH_NAME,
-                    $crate::clientnode::METH_PING,
-                    ],
-                    $crate::RequestHandler::stateless(process_request)
-                )]
-            )
+pub struct DotAppNode {
+    app_name: String,
+    shv_version_major: i32,
+    shv_version_minor: i32,
+}
 
+impl DotAppNode {
+    pub fn new(app_name: impl Into<String>) -> Self {
+        Self {
+            app_name: app_name.into(),
+            shv_version_major: SHV_VERSION_MAJOR,
+            shv_version_minor: SHV_VERSION_MINOR,
         }
-    };
+    }
 }
 
-// TODO: Use for future implementation of standalone (info) nodes
-struct AppDeviceNode {
-    pub device_name: &'static str,
-    pub version: &'static str,
-    pub serial_number: Option<String>,
+impl ConstantNode for DotAppNode {
+    fn methods(&self) -> Vec<&MetaMethod> {
+        DOT_APP_METHODS.iter().collect()
+    }
+
+    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, shv::rpcmessage::RpcError>> {
+        match request.method() {
+            Some(METH_SHV_VERSION_MAJOR) => Some(self.shv_version_major.into()),
+            Some(METH_SHV_VERSION_MINOR) => Some(self.shv_version_minor.into()),
+            Some(METH_NAME) => Some(RpcValue::from(&self.app_name)),
+            Some(METH_PING) => Some(().into()),
+            _ => None,
+        }.map(Ok)
+    }
 }
 
-pub const APP_DEVICE_METHODS: [MetaMethod; 3] = [
+const DOT_DEVICE_METHODS: [MetaMethod; 3] = [
     MetaMethod {
         name: METH_NAME,
         flags: Flag::IsGetter as u32,
@@ -156,37 +106,37 @@ pub const APP_DEVICE_METHODS: [MetaMethod; 3] = [
     },
 ];
 
-const APP_DEVICE_NODE: AppDeviceNode = AppDeviceNode {
-    device_name: "",
-    version: "",
-    serial_number: None,
-};
+pub struct DotDeviceNode {
+    device_name: String,
+    version: String,
+    serial_number: Option<String>,
+}
 
-async fn app_device_node_process_request(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
-    if request.shv_path().unwrap_or_default().is_empty() {
-        let mut resp = request.prepare_response().unwrap_or_default();
-        let resp_value = match request.method() {
-            Some(METH_NAME) => Some(RpcValue::from(APP_DEVICE_NODE.device_name)),
-            Some(METH_VERSION) => Some(RpcValue::from(APP_DEVICE_NODE.version)),
-            Some(METH_SERIAL_NUMBER) => match &APP_DEVICE_NODE.serial_number {
-                None => Some(RpcValue::null()),
-                Some(sn) => Some(RpcValue::from(sn)),
-            },
-            _ => None,
-        };
-        if let Some(val) = resp_value {
-            resp.set_result(val);
-            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
-                error!("app_device_node_process_request: Cannot send response ({e})");
-            }
+impl DotDeviceNode {
+    pub fn new(device_name: impl Into<String>, version: impl Into<String>, serial_number: impl Into<Option<String>>) -> Self {
+        Self {
+            device_name: device_name.into(),
+            version: version.into(),
+            serial_number: serial_number.into(),
         }
     }
 }
 
-pub fn app_device_node_routes<T>() -> Vec<Route<T>> {
-    [Route::new(
-        [METH_NAME, METH_VERSION, METH_SERIAL_NUMBER],
-        RequestHandler::stateless(app_device_node_process_request),
-    )]
-    .into()
+impl ConstantNode for DotDeviceNode {
+    fn methods(&self) -> Vec<&MetaMethod> {
+        DOT_DEVICE_METHODS.iter().collect()
+    }
+
+    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, shv::rpcmessage::RpcError>> {
+        match request.method() {
+            Some(METH_NAME) => Some(RpcValue::from(&self.device_name)),
+            Some(METH_VERSION) => Some(RpcValue::from(&self.version)),
+            Some(METH_SERIAL_NUMBER) => match &self.serial_number {
+                None => Some(RpcValue::null()),
+                Some(sn) => Some(RpcValue::from(sn)),
+            },
+            _ => None,
+        }.map(Ok)
+    }
 }
+
