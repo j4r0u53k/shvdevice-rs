@@ -1,15 +1,13 @@
-use std::time::Duration;
-
 use shvclient::appnodes::DotAppNode;
 use tokio::sync::RwLock;
 
 use clap::Parser;
 use futures::{select, FutureExt};
 use log::*;
-use shv::metamethod::{Flag, MetaMethod};
+use shv::metamethod::MetaMethod;
 use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
-use shvclient::{MethodsGetter, RequestHandler};
+use shvclient::{no_response, MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
 use simple_logger::SimpleLogger;
@@ -71,46 +69,7 @@ fn load_client_config(cli_opts: &Opts) -> shv::Result<ClientConfig> {
     Ok(config)
 }
 
-const METH_GET_DELAYED: &str = "getDelayed";
-
-const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
-    name: METH_GET_DELAYED,
-    flags: Flag::IsGetter as u32,
-    access: shv::metamethod::AccessLevel::Browse,
-    param: "",
-    result: "",
-    description: "",
-}];
-
 type State = RwLock<i32>;
-
-async fn delay_node_process_request(
-    request: RpcMessage,
-    client_cmd_tx: Sender<ClientCommand>,
-    mut state: Option<AppData<State>>,
-) {
-    if request.shv_path().unwrap_or_default().is_empty() {
-        assert_eq!(request.method(), Some(METH_GET_DELAYED));
-        let mut resp = request.prepare_response().unwrap_or_default();
-        tokio::task::spawn(async move {
-            let mut counter = state
-                .as_mut()
-                .expect("Missing state for delay node")
-                .write()
-                .await;
-            let ret_val = {
-                *counter += 1;
-                *counter
-            };
-            drop(counter);
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            resp.set_result(ret_val);
-            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
-                error!("delay_node_process_request: Cannot send response ({e})");
-            }
-        });
-    }
-}
 
 async fn emit_chng_task(
     client_cmd_tx: Sender<ClientCommand>,
@@ -176,15 +135,53 @@ pub(crate) async fn main() -> shv::Result<()> {
     async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
     }
 
-    let delay_node = ClientNode::steady(
-        &DELAY_METHODS,
-        [Route::new(
-            [METH_GET_DELAYED],
-            RequestHandler::stateful(delay_node_process_request),
-        )]
+    let stateless_node = shvclient::fixed_node!{
+        device_handler(request, client_cmd_tx) {
+            "something" [IsGetter, Browse] (param: Int) => {
+                println!("param: {}", param);
+                Some(Ok(shv::RpcValue::from("name result")))
+            }
+            "42" [IsGetter, Browse] => {
+                Some(Ok(shv::RpcValue::from(42)))
+            }
+        }
+    };
+
+    let delay_node = shvclient::fixed_node!(
+        delay_handler<State>(request, client_cmd_tx, app_data) {
+            "getDelayed" [IsGetter, Browse] => {
+                let mut resp = request.prepare_response().unwrap_or_default();
+                tokio::task::spawn(async move {
+                    let mut app_data = app_data;
+                    let mut counter = app_data
+                        .as_mut()
+                        .expect("Missing state for delay node")
+                        .write()
+                        .await;
+                    let ret_val = {
+                        *counter += 1;
+                        *counter
+                    };
+                    drop(counter);
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    resp.set_result(ret_val);
+                    if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
+                        error!("delay_node_process_request: Cannot send response ({e})");
+                    }
+                });
+
+                // The response is sent in the task above, so we need
+                // to tell the library to not send any response.
+                no_response!()
+
+                // Otherwise, return either RpcValue or RpcError
+                // Some(Ok(shv::RpcValue::from(true)))
+            }
+        }
     );
 
     shvclient::Client::new(DotAppNode::new("simple_device_tokio"))
+        .mount("stateless", stateless_node)
         .mount("status/delayed", delay_node)
         .mount("status/dyn", ClientNode::dynamic(
                 MethodsGetter::new(dyn_methods_getter),

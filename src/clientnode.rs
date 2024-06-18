@@ -1,18 +1,19 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::client::{ClientCommand, RequestHandler, Route, Sender, MethodsGetter, AppData};
+use crate::client::{ClientCommand, RequestHandler, Sender, MethodsGetter, AppData};
 use crate::runtime::spawn_task;
 use log::{error, warn};
-use shv::metamethod::AccessLevel;
-use shv::metamethod::{Flag, MetaMethod};
 use shv::rpcframe::RpcFrame;
-use shv::rpcmessage::{RpcError, RpcErrorCode};
-use shv::{metamethod, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
+use shv::{metamethod, rpcvalue, RpcMessage, RpcMessageMetaTags};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::format;
 use std::rc::Rc;
 use std::sync::Arc;
+// Reexport for use in the macros
+pub use shv::metamethod::{AccessLevel, Flag, MetaMethod};
+pub use shv::rpcmessage::{RpcError, RpcErrorCode};
+pub use shv::rpcvalue::{RpcValue, Value};
 
 enum DirParam {
     Brief,
@@ -223,14 +224,32 @@ pub(crate) fn find_longest_prefix<'a, V>(
     None
 }
 
+pub struct Route<T> {
+    pub handler: RequestHandler<T>,
+    pub methods: Vec<String>,
+}
+
+impl<T> Route<T> {
+    pub fn new<I>(methods: I, handler: RequestHandler<T>) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<String>,
+    {
+        Self {
+            handler,
+            methods: methods.into_iter().map(|x| x.into()).collect(),
+        }
+    }
+}
+
 type StaticNodeHandlers<T> = BTreeMap<String, Rc<RequestHandler<T>>>;
 
-struct SteadyNode<'a, T> {
+struct FixedNode<'a, T> {
     methods: Vec<&'a MetaMethod>,
     handlers: StaticNodeHandlers<T>,
 }
 
-impl<'a, T> SteadyNode<'a, T> {
+impl<'a, T> FixedNode<'a, T> {
     fn new(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
         let methods = DIR_LS_METHODS.iter().chain(methods).collect::<Vec<&MetaMethod>>();
         let handlers = Self::add_routes(&methods, routes);
@@ -285,7 +304,7 @@ pub trait ConstantNode {
 // remove Constant variant. Steady node would have only one handler for the whole node.
 
 enum NodeVariant<'a, T> {
-    Steady(SteadyNode<'a, T>),
+    Fixed(FixedNode<'a, T>),
     Dynamic(Arc<DynamicNode<T>>),
     Constant(Box<dyn ConstantNode>),
 }
@@ -293,8 +312,8 @@ enum NodeVariant<'a, T> {
 pub struct ClientNode<'a, T>(NodeVariant<'a, T>);
 
 impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
-    pub fn steady(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
-        Self(NodeVariant::Steady(SteadyNode::new(methods, routes)))
+    pub fn fixed(methods: impl IntoIterator<Item = &'a MetaMethod>, routes: impl IntoIterator<Item = Route<T>>) -> Self {
+        Self(NodeVariant::Fixed(FixedNode::new(methods, routes)))
     }
 
     pub fn dynamic(methods: MethodsGetter<T>, handler: RequestHandler<T>) -> Self {
@@ -313,7 +332,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
 
     pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
         match &self.0 {
-            NodeVariant::Steady(node) => {
+            NodeVariant::Fixed(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
                     node.methods.as_slice()
                 } else {
@@ -508,6 +527,137 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
     },
 ];
 
+// Generator for fixed nodes
+
+#[macro_export]
+macro_rules! count {
+    () => (0usize);
+    ( $x:tt $($xs:tt)* ) => (1usize + $crate::count!($($xs)*));
+}
+
+#[macro_export]
+macro_rules! no_response {
+    () => {
+        None::<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>>
+    };
+}
+
+#[macro_export]
+macro_rules! fixed_node {
+    ($fn_name:ident $(<$T:ty>)? ($request:ident, $client_cmd_tx:ident $(, $app_state:ident)?) {
+        $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ident))? => $body:block)+
+    }) => {
+
+        {
+            const METHODS: [$crate::clientnode::MetaMethod; $crate::count!($($method)+)] = [
+                $(MetaMethod {
+                    name: $method,
+                    flags: $($crate::clientnode::Flag::$flags as u32)|+,
+                    access: $crate::clientnode::AccessLevel::$access,
+                    param: "",
+                    result: "",
+                    description: "",
+                },)+
+            ];
+
+            async fn $fn_name($request: RpcMessage, $client_cmd_tx: Sender<ClientCommand> $(, $app_state: Option<AppData<$T>>)?) {
+
+                if $request.shv_path().unwrap_or_default().is_empty() {
+                    let mut __resp = $request.prepare_response().unwrap_or_default();
+                    let __client_cmd_tx_clone = $client_cmd_tx.clone();
+                    let resp_value = match $request.method() {
+
+                        $(Some($method) => {
+                            $crate::method_handler!($(($param : $type))? @$request@ $body)
+                        })+
+
+                        _ => Some(Err($crate::clientnode::RpcError::new(
+                                $crate::clientnode::RpcErrorCode::MethodNotFound,
+                                format!("Invalid method: {:?}", $request.method())))
+                        )
+                    };
+
+                    if let Some(val) = resp_value {
+                        if let Ok(res) = val {
+                            __resp.set_result(res);
+                        } else if let Err(err) = val {
+                            __resp.set_error(err);
+                        }
+
+                        if let Err(e) = __client_cmd_tx_clone.unbounded_send($crate::client::ClientCommand::SendMessage { message: __resp }) {
+                            error!("{}: Cannot send response ({e})", stringify!($fn_name));
+                        }
+                    }
+                };
+            }
+
+            $crate::clientnode::ClientNode::fixed(
+                &METHODS,
+                [Route::new(
+                    [$($method),+],
+                    $crate::request_handler!($fn_name $(,$app_state)?),
+                )]
+            )
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! request_handler {
+    ($fn_name:ident) => {
+        RequestHandler::stateless($fn_name)
+    };
+    ($fn_name:ident, $app_data:ident) => {
+        RequestHandler::stateful($fn_name)
+    };
+}
+
+#[macro_export]
+macro_rules! method_handler {
+    (($param:ident : $type:ident) @$request:ident@ $body:block) => {
+        {
+            let request_param = $request.param().unwrap_or_default();
+
+            if let $crate::clientnode::Value::$type($param) = request_param.value() {
+                $body
+            } else {
+                Some(Err($crate::clientnode::RpcError::new(
+                        $crate::clientnode::RpcErrorCode::InvalidParam,
+                        format!("Expected parameter type `{}`, got `{}`",
+                            stringify!($type),
+                            request_param.type_name()
+                        )))
+                )
+            }
+        }
+    };
+    (@$request:ident@ $body:block) => {
+        $body
+    };
+}
+
+// Usage example:
+//
+//  let node = fixed_node!{
+//         device_handler<i32>(request, client_cmd_tx, app_data) {
+//             "name" [IsGetter, Browse] (param: Int) => {
+//                 println!("param: {}", param);
+//                 app_data.map(|v| { println!("app_data: {}", *v); });
+//                 Some(Ok(RpcValue::from("name result")))
+//             }
+//             "version" [IsGetter, Browse] => {
+//                 Some(Ok(RpcValue::from(42)))
+//             }
+//         }
+//     }
+// }
+//
+// Type in < > and app_data parameres are optional.
+//
+// TODO: documentation
+//
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,46 +698,46 @@ mod tests {
 
     #[test]
     fn accept_valid_routes() {
-        ClientNode::steady(&PROPERTY_METHODS,
+        ClientNode::fixed(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     fn accept_valid_routes_without_ls() {
-        ClientNode::steady(&PROPERTY_METHODS,
+        ClientNode::fixed(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_sig_chng_route() {
-        ClientNode::steady(&PROPERTY_METHODS,
+        ClientNode::fixed(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_LS, SIG_CHNG], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_custom_dir_handler() {
-        ClientNode::steady(&PROPERTY_METHODS,
+        ClientNode::fixed(&PROPERTY_METHODS,
                             vec![Route::new([METH_GET, METH_SET, METH_DIR], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_invalid_method_route() {
-        ClientNode::steady(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
+        ClientNode::fixed(&PROPERTY_METHODS, vec![Route::new(["invalidMethod"], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_unhandled_method() {
-        ClientNode::steady(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
+        ClientNode::fixed(&PROPERTY_METHODS, vec![Route::new([METH_GET], RequestHandler::stateful(dummy_handler))]);
     }
 
     #[test]
     #[should_panic]
     fn reject_duplicate_method() {
         let duplicate_methods = PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
-        ClientNode::steady(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
+        ClientNode::fixed(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
     }
 }

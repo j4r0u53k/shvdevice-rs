@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::clientnode::{find_longest_prefix, process_local_dir_ls, ClientNode, RequestResult};
+use crate::clientnode::{find_longest_prefix, process_local_dir_ls, Route, ClientNode, RequestResult};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
@@ -70,24 +70,6 @@ impl<T> RequestHandler<T> {
         Fut: Future<Output=()> + Send + 'static
     {
         Self(Box::new(move |req, tx, _data| Box::pin(func(req, tx))))
-    }
-}
-
-pub struct Route<T> {
-    pub handler: RequestHandler<T>,
-    pub methods: Vec<String>,
-}
-
-impl<T> Route<T> {
-    pub fn new<I>(methods: I, handler: RequestHandler<T>) -> Self
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        Self {
-            handler,
-            methods: methods.into_iter().map(|x| x.into()).collect(),
-        }
     }
 }
 
@@ -171,13 +153,13 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn mount_steady<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
+    pub fn mount_fixed<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
     where
         P: Into<String>,
         M: IntoIterator<Item = &'static MetaMethod>,
         R: IntoIterator<Item = Route<T>>,
     {
-        self.mounts.insert(path.into(), ClientNode::steady(defined_methods, routes));
+        self.mounts.insert(path.into(), ClientNode::fixed(defined_methods, routes));
         self
     }
 
@@ -681,7 +663,7 @@ mod tests {
             client.mount_dynamic("dynamic/async",
                                  MethodsGetter::new(methods_getter),
                                  RequestHandler::stateless(request_handler));
-            client.mount_steady("static",
+            client.mount_fixed("static",
                                 PROPERTY_METHODS.iter(),
                                 [Route::new([crate::clientnode::METH_GET, crate::clientnode::METH_SET],
                                             RequestHandler::stateless(request_handler))]);
