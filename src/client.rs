@@ -22,10 +22,37 @@ pub type Receiver<K> = futures::channel::mpsc::UnboundedReceiver<K>;
 
 type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
 
+mod sealed {
+    static SUBSCRIPTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    pub fn next_subscription_id() -> u64 {
+        SUBSCRIPTION_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+use sealed::next_subscription_id;
+
 #[derive(Clone)]
 pub struct ClientCommandSender {
     pub(crate) sender: Sender<ClientCommand>,
 }
+
+// pub struct NotificationsReceiver {
+//     rx_channel: Receiver<RpcFrame>,
+//     unsubscriber: Box<dyn FnOnce() -> Result<(), TrySendError<ClientCommand>>>,
+// }
+//
+// impl NotificationsReceiver {
+//     pub fn recv(&mut self) -> futures::prelude::stream::Next<'_, Receiver<RpcFrame>> {
+//         self.rx_channel.next()
+//     }
+// }
+//
+// impl Drop for NotificationsReceiver {
+//     fn drop(&mut self) {
+//         let u = self.unsubscriber.clone();
+//         u.deref
+//     }
+// }
 
 impl ClientCommandSender {
     pub fn do_rpc_call_param<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>, param: Option<RpcValue>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
@@ -45,16 +72,30 @@ impl ClientCommandSender {
         self.sender.unbounded_send(ClientCommand::SendMessage { message })
     }
 
-    pub fn subscribe(&self, path: impl Into<String>/*, _method: impl Into<String>*/) -> Result<(Receiver<RpcFrame>, impl FnOnce() -> Result<(), TrySendError<ClientCommand>>), TrySendError<ClientCommand>> {
+    pub fn subscribe(&self, path: impl Into<String>, signal: impl Into<String>) -> Result<(Receiver<RpcFrame>, impl FnOnce() -> Result<(), TrySendError<ClientCommand>>), TrySendError<ClientCommand>> {
         let path = path.into();
+        let signal = signal.into();
+        let subscription_id = next_subscription_id();
         let (notifications_sender, notifications_receiver) = futures::channel::mpsc::unbounded();
-        self.sender.unbounded_send(ClientCommand::Subscribe {
-            path: path.clone(),
-            notifications_sender })
-            .map(move |_| {
-                let client_cmd_sender = self.sender.clone();
-                (notifications_receiver, move || { client_cmd_sender.unbounded_send(ClientCommand::Unsubscribe { path }) } )
-            })
+        self.sender.unbounded_send(
+            ClientCommand::Subscribe {
+                path: path.clone(),
+                signal: signal.clone(),
+                subscription_id,
+                notifications_sender
+            }
+        ).map(move |_| {
+            let client_cmd_sender = self.sender.clone();
+
+            (notifications_receiver,
+             move || { client_cmd_sender.unbounded_send(
+                 ClientCommand::Unsubscribe {
+                     path,
+                     signal,
+                     subscription_id
+                 })
+             })
+        })
     }
 }
 
@@ -68,12 +109,14 @@ pub enum ClientCommand {
     },
     Subscribe {
         path: String,
-        // methods: String, // Not implemented
+        signal: String,
+        subscription_id: u64,
         notifications_sender: Sender<RpcFrame>,
     },
     Unsubscribe {
-        // method: String,
         path: String,
+        signal: String,
+        subscription_id: u64,
     },
 }
 
@@ -165,6 +208,61 @@ impl<T: ?Sized> From<Arc<T>> for AppData<T> {
     }
 }
 
+// path -> signal -> subscription ID -> notification sender
+#[derive(Debug, Default)]
+struct Subscriptions(BTreeMap<String, BTreeMap<String, BTreeMap<u64, Sender<RpcFrame>>>>);
+
+impl Subscriptions {
+    fn new() -> Self {
+        Default::default()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    fn add(&mut self, path: impl Into<String>, signal: impl Into<String>, subscription_id: u64, notifications_sender: Sender<RpcFrame>) -> bool
+    {
+        let path = path.into();
+        let signal = signal.into();
+
+        let path_signal_subscriptions = self.0
+            .entry(path.clone()).or_default()
+            .entry(signal.clone()).or_default();
+
+        let new_subscription = path_signal_subscriptions.is_empty();
+
+        if let Some(_) = path_signal_subscriptions.insert(subscription_id, notifications_sender) {
+            panic!("BUG: Subscription with the same ID {} for path: {}, method: {}. Dump: {:?}",
+                subscription_id, path, signal, &self);
+        }
+
+        new_subscription
+    }
+
+    fn remove(&mut self, path: impl Into<String>, signal: impl Into<String>, subscription_id: u64) -> bool {
+        let path = path.into();
+        let signal = signal.into();
+
+        let removed_last = if let Some(signals) = self.0.get_mut(&path) {
+            if let Some(ids) = signals.get_mut(&signal) {
+                ids.remove(&subscription_id).map(|_| ids.is_empty())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if removed_last.is_none() {
+            warn!("Remove non-existing subscription for path: {}, signal: {}, id: {}. Dump: {:?}",
+                &path, &signal, &subscription_id, &self);
+        }
+
+        removed_last.is_some_and(|was_last| was_last)
+    }
+}
+
 pub struct Client<T> {
     mounts: BTreeMap<String, ClientNode<'static, T>>,
     app_data: Option<AppData<T>>,
@@ -251,7 +349,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
-        let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
+        let mut subscriptions = Subscriptions::new();
 
         let (client_cmd_tx, mut client_cmd_rx) = futures::channel::mpsc::unbounded();
         let client_cmd_tx = ClientCommandSender { sender: client_cmd_tx };
@@ -273,37 +371,37 @@ impl<T: Send + Sync + 'static> Client<T> {
                     Some(client_cmd) => {
                         use ClientCommand::*;
                         match client_cmd {
-                            SendMessage{message} => {
+                            SendMessage { message } => {
                                 if let Some(ref conn_cmd_sender) = conn_cmd_sender {
                                     if let Err(e) = conn_cmd_sender.unbounded_send(ConnectionCommand::SendMessage(message)) {
                                         error!("Cannot send message through ConnectionCommand channel: {e}");
                                     }
                                 }
                             },
-                            RpcCall{request, response_sender} => {
+                            RpcCall { request, response_sender } => {
                                 let req_id = request.request_id().expect("request_id in the request of a RpcCall must be set");
                                 if pending_rpc_calls.insert(req_id, response_sender).is_some() {
                                     error!("request_id {req_id} for async RpcCall has already been registered");
                                 }
                                 client_cmd_tx.send_message(request)?;
                             },
-                            Subscribe{path, /* methods, */ notifications_sender} => {
-                                if subscriptions.insert(path.clone(), notifications_sender).is_some() {
-                                    warn!("Path {} has already been subscribed!", &path);
+                            Subscribe { path, signal, subscription_id, notifications_sender } => {
+                                if subscriptions.add(&path, &signal, subscription_id, notifications_sender) {
+                                    let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
+                                    client_cmd_tx
+                                        .send_message(request)
+                                        .expect("Cannot send subscription request through ClientCommand channel");
+                                } else {
+                                    warn!("Path {} and signal {} have already been subscribed!", &path, &signal);
                                 }
-                                let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
-                                client_cmd_tx
-                                    .send_message(request)
-                                    .expect("Cannot send subscription request through ClientCommand channel");
                             },
-                            Unsubscribe{path} => {
-                                if subscriptions.remove(&path).is_none() {
-                                    warn!("No subscription found for path `{}`", &path);
+                            Unsubscribe { path, signal, subscription_id } => {
+                                if subscriptions.remove(&path, &signal, subscription_id) {
+                                    let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
+                                    client_cmd_tx
+                                        .send_message(request)
+                                        .expect("Cannot send subscription request through ClientCommand channel");
                                 }
-                                let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
-                                client_cmd_tx
-                                    .send_message(request)
-                                    .expect("Cannot send subscription request through ClientCommand channel");
                             },
                         }
                         next_client_cmd = client_cmd_rx.next().fuse();
@@ -329,6 +427,10 @@ impl<T: Send + Sync + 'static> Client<T> {
                             },
                             Disconnected => {
                                 conn_cmd_sender = None;
+                                // NOTE: When a client is disconnected, the broker also knows that
+                                // (because of heartbeats) and it should remove all the subscriptions
+                                // registered by the client, so the client can also safely clear
+                                // the subscriptions here.
                                 subscriptions.clear();
                                 pending_rpc_calls.clear();
                                 if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Disconnected) {
@@ -352,7 +454,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         frame: RpcFrame,
         client_cmd_tx: &ClientCommandSender,
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
-        subscriptions: &mut HashMap<String, Sender<RpcFrame>>,
+        subscriptions: &mut Subscriptions,
     ) -> shv::Result<()> {
         if frame.is_request() {
             if let Ok(mut request_msg) = frame.to_rpcmesage() {
@@ -405,18 +507,19 @@ impl<T: Send + Sync + 'static> Client<T> {
                 }
             }
         } else if frame.is_signal() {
-            if let Some(path) = frame.shv_path() {
-                if let Some((subscribed_path, _)) = find_longest_prefix(subscriptions, path) {
-                    let notifications_sender = subscriptions.get(subscribed_path).unwrap();
-                    let subscribed_path = subscribed_path.to_owned();
-                    if notifications_sender.unbounded_send(frame).is_err() {
-                        warn!("Notification channel for path `{}` closed while subscription still active. Automatically unsubscribing.", &subscribed_path);
-                        subscriptions.remove(&subscribed_path);
-                        let request = create_subscription_request(
-                            &subscribed_path,
-                            SubscriptionRequest::Unsubscribe,
-                        );
-                        client_cmd_tx.send_message(request)?;
+            if let (Some(path), Some(signal)) = (frame.shv_path(), frame.method()) {
+                for (subscribed_path, subscribed_signals) in &subscriptions.0 {
+                    if path.strip_prefix(subscribed_path).is_some_and(|path_rest| path_rest.is_empty() || path_rest.starts_with('/')) {
+                        if let Some(subscribers) = subscribed_signals.get(signal) {
+                            for (subscription_id, notifications_sender) in subscribers {
+                                if notifications_sender.unbounded_send(frame.clone()).is_err() {
+                                    warn!("Notification channel for path `{}`, signal `{}`, id: {} closed while the subscription is still active (possible BUG)",
+                                        &subscribed_path,
+                                        &signal,
+                                        subscription_id);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -620,7 +723,7 @@ mod tests {
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let (mut notify_rx, _) = cli_cmd_tx
-                .subscribe("path/to/resource")
+                .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
             let _subscribe_req = conn_mock.expect_send_message().await;
@@ -641,7 +744,7 @@ mod tests {
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let (mut notify_rx, _) = cli_cmd_tx
-                .subscribe("path/to/resource")
+                .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
             let _subscribe_req = conn_mock.expect_send_message().await;
