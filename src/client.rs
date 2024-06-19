@@ -3,6 +3,7 @@ use crate::clientnode::{find_longest_prefix, process_local_dir_ls, Route, Client
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
+use futures::channel::mpsc::TrySendError;
 use log::*;
 use shv::client::ClientConfig;
 use shv::metamethod::MetaMethod;
@@ -21,6 +22,42 @@ pub type Receiver<K> = futures::channel::mpsc::UnboundedReceiver<K>;
 
 type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
 
+#[derive(Clone)]
+pub struct ClientCommandSender {
+    pub(crate) sender: Sender<ClientCommand>,
+}
+
+impl ClientCommandSender {
+    pub fn do_rpc_call_param<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>, param: Option<RpcValue>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
+        let (response_sender, response_receiver) = futures::channel::mpsc::unbounded();
+        self.sender.unbounded_send(ClientCommand::RpcCall {
+            request: RpcMessage::new_request(shvpath.into(), method.into(), param),
+            response_sender
+        })
+        .map(|_| response_receiver)
+    }
+
+    pub fn do_rpc_call<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
+        self.do_rpc_call_param(shvpath, method, None)
+    }
+
+    pub fn send_message(&self, message: RpcMessage) -> Result<(), TrySendError<ClientCommand>> {
+        self.sender.unbounded_send(ClientCommand::SendMessage { message })
+    }
+
+    pub fn subscribe(&self, path: impl Into<String>/*, _method: impl Into<String>*/) -> Result<(Receiver<RpcFrame>, impl FnOnce() -> Result<(), TrySendError<ClientCommand>>), TrySendError<ClientCommand>> {
+        let path = path.into();
+        let (notifications_sender, notifications_receiver) = futures::channel::mpsc::unbounded();
+        self.sender.unbounded_send(ClientCommand::Subscribe {
+            path: path.clone(),
+            notifications_sender })
+            .map(move |_| {
+                let client_cmd_sender = self.sender.clone();
+                (notifications_receiver, move || { client_cmd_sender.unbounded_send(ClientCommand::Unsubscribe { path }) } )
+            })
+    }
+}
+
 pub enum ClientCommand {
     SendMessage {
         message: RpcMessage,
@@ -35,6 +72,7 @@ pub enum ClientCommand {
         notifications_sender: Sender<RpcFrame>,
     },
     Unsubscribe {
+        // method: String,
         path: String,
     },
 }
@@ -53,12 +91,12 @@ impl<T> MethodsGetter<T> {
     }
 }
 
-pub struct RequestHandler<T>(pub(crate) Box<dyn Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>);
+pub struct RequestHandler<T>(pub(crate) Box<dyn Fn(RpcMessage, ClientCommandSender, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>);
 
 impl<T> RequestHandler<T> {
     pub fn stateful<F, Fut>(func: F) -> Self
     where
-        F: Fn(RpcMessage, Sender<ClientCommand>, Option<AppData<T>>) -> Fut + Sync + Send + 'static,
+        F: Fn(RpcMessage, ClientCommandSender, Option<AppData<T>>) -> Fut + Sync + Send + 'static,
         Fut: Future<Output=()> + Send + 'static
     {
         Self(Box::new(move |req, tx, data| Box::pin(func(req, tx, data))))
@@ -66,7 +104,7 @@ impl<T> RequestHandler<T> {
 
     pub fn stateless<F, Fut>(func: F) -> Self
     where
-        F: Fn(RpcMessage, Sender<ClientCommand>) -> Fut + Sync + Send + 'static,
+        F: Fn(RpcMessage, ClientCommandSender) -> Fut + Sync + Send + 'static,
         Fut: Future<Output=()> + Send + 'static
     {
         Self(Box::new(move |req, tx, _data| Box::pin(func(req, tx))))
@@ -182,7 +220,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         init_handler: Option<H>,
     ) -> shv::Result<()>
     where
-        H: FnOnce(Sender<ClientCommand>, ClientEventsReceiver),
+        H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
         let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
         spawn_connection_task(config, conn_evt_tx);
@@ -192,14 +230,14 @@ impl<T: Send + Sync + 'static> Client<T> {
     pub async fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
         self.run_with_init_opt(
             config,
-            Option::<fn(Sender<ClientCommand>, ClientEventsReceiver)>::None,
+            Option::<fn(ClientCommandSender, ClientEventsReceiver)>::None,
         )
         .await
     }
 
     pub async fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shv::Result<()>
     where
-        H: FnOnce(Sender<ClientCommand>, ClientEventsReceiver),
+        H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
         self.run_with_init_opt(config, Some(handler)).await
     }
@@ -210,12 +248,13 @@ impl<T: Send + Sync + 'static> Client<T> {
         init_handler: Option<H>,
     ) -> shv::Result<()>
     where
-        H: FnOnce(Sender<ClientCommand>, ClientEventsReceiver),
+        H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions: HashMap<String, Sender<RpcFrame>> = HashMap::new();
 
         let (client_cmd_tx, mut client_cmd_rx) = futures::channel::mpsc::unbounded();
+        let client_cmd_tx = ClientCommandSender { sender: client_cmd_tx };
         let (mut client_events_tx, client_events_rx) = async_broadcast::broadcast(10);
         client_events_tx.set_overflow(true);
         let client_events_receiver = ClientEventsReceiver(client_events_rx.clone());
@@ -246,7 +285,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                 if pending_rpc_calls.insert(req_id, response_sender).is_some() {
                                     error!("request_id {req_id} for async RpcCall has already been registered");
                                 }
-                                client_cmd_tx.unbounded_send(SendMessage{ message: request })?;
+                                client_cmd_tx.send_message(request)?;
                             },
                             Subscribe{path, /* methods, */ notifications_sender} => {
                                 if subscriptions.insert(path.clone(), notifications_sender).is_some() {
@@ -254,7 +293,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                 }
                                 let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
                                 client_cmd_tx
-                                    .unbounded_send(SendMessage { message: request })
+                                    .send_message(request)
                                     .expect("Cannot send subscription request through ClientCommand channel");
                             },
                             Unsubscribe{path} => {
@@ -263,7 +302,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                 }
                                 let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
                                 client_cmd_tx
-                                    .unbounded_send(SendMessage { message: request })
+                                    .send_message(request)
                                     .expect("Cannot send subscription request through ClientCommand channel");
                             },
                         }
@@ -311,7 +350,7 @@ impl<T: Send + Sync + 'static> Client<T> {
     async fn process_rpc_frame(
         &self,
         frame: RpcFrame,
-        client_cmd_tx: &Sender<ClientCommand>,
+        client_cmd_tx: &ClientCommandSender,
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
         subscriptions: &mut HashMap<String, Sender<RpcFrame>>,
     ) -> shv::Result<()> {
@@ -332,22 +371,18 @@ impl<T: Send + Sync + 'static> Client<T> {
                                     RpcErrorCode::MethodNotFound,
                                     format!("Invalid shv path {shv_path}:{method}()"),
                                 ));
-                                client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp })?;
+                                client_cmd_tx.send_message(resp)?;
                             }
                         }
                         Some(result) => {
                             match result {
                                 RequestResult::Response(r) => {
                                     resp.set_result(r);
-                                    client_cmd_tx.unbounded_send(ClientCommand::SendMessage {
-                                        message: resp,
-                                    })?;
+                                    client_cmd_tx.send_message(resp)?;
                                 }
                                 RequestResult::Error(e) => {
                                     resp.set_error(e);
-                                    client_cmd_tx.unbounded_send(ClientCommand::SendMessage {
-                                        message: resp,
-                                    })?;
+                                    client_cmd_tx.send_message(resp)?;
                                 }
                             }
                         }
@@ -381,7 +416,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                             &subscribed_path,
                             SubscriptionRequest::Unsubscribe,
                         );
-                        client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: request })?;
+                        client_cmd_tx.send_message(request)?;
                     }
                 }
             }
@@ -487,7 +522,7 @@ mod tests {
         }
 
         pub async fn receive_connected_and_disconnected_events(conn_evt_tx: Sender<ConnectionEvent>,
-                                                               _cli_cmd_tx: Sender<ClientCommand>,
+                                                               _cli_cmd_tx: ClientCommandSender,
                                                                mut client_events_rx: ClientEventsReceiver)
         {
             {
@@ -501,14 +536,16 @@ mod tests {
         }
 
         pub async fn send_message(conn_evt_tx: Sender<ConnectionEvent>,
-                                  cli_cmd_tx: Sender<ClientCommand>,
+                                  cli_cmd_tx: ClientCommandSender,
                                   mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
 
-            cli_cmd_tx.unbounded_send(ClientCommand::SendMessage {
-                message: RpcMessage::new_request("path/test", "test_method", Some(42.into()))
-            }).expect("Client command send");
+            cli_cmd_tx.send_message(RpcMessage::new_request(
+                    "path/test",
+                    "test_method",
+                    Some(42.into())))
+                .expect("Client command send");
 
             let msg = conn_mock.expect_send_message().await;
 
@@ -519,14 +556,16 @@ mod tests {
         }
 
         pub async fn send_message_fails(conn_evt_tx: Sender<ConnectionEvent>,
-                                        cli_cmd_tx: Sender<ClientCommand>,
+                                        cli_cmd_tx: ClientCommandSender,
                                         mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
 
-            cli_cmd_tx.unbounded_send(ClientCommand::SendMessage {
-                message: RpcMessage::new_request("path/test", "test_method", Some(42.into()))
-            }).expect("Client command send");
+            cli_cmd_tx.send_message(RpcMessage::new_request(
+                    "path/test",
+                    "test_method",
+                    Some(42.into())))
+                .expect("Client command send");
 
             let msg = conn_mock.expect_send_message().await;
 
@@ -536,25 +575,18 @@ mod tests {
             assert_eq!(msg.param(), Some(&RpcValue::from(41)));
         }
 
-        fn do_rpc_call(cli_cmd_tx: &Sender<ClientCommand>, path: &str, method: &str, param: Option<RpcValue>) -> Receiver<RpcFrame> {
-            let (resp_tx, resp_rx) = futures::channel::mpsc::unbounded();
-            cli_cmd_tx.unbounded_send(ClientCommand::RpcCall {
-                request: RpcMessage::new_request(path, method, param),
-                response_sender: resp_tx,
-            }).expect("RpcCall command send");
-            resp_rx
-        }
-
         async fn receive_rpc_msg(rx: &mut Receiver<RpcFrame>) -> RpcMessage {
             rx.next().await.unwrap().to_rpcmesage().unwrap()
         }
 
         pub async fn call_method_and_receive_response(conn_evt_tx: Sender<ConnectionEvent>,
-                                                  cli_cmd_tx: Sender<ClientCommand>,
+                                                  cli_cmd_tx: ClientCommandSender,
                                                   mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
-            let mut resp_rx = do_rpc_call(&cli_cmd_tx, "path/to/resource", "get", None);
+            let mut resp_rx = cli_cmd_tx
+                .do_rpc_call("path/to/resource", "get")
+                .expect("RpcCall command send");
 
             let req = conn_mock.expect_send_message().await;
             conn_mock.emulate_receive_response(&req, 42);
@@ -565,20 +597,13 @@ mod tests {
         }
 
         pub async fn call_method_timeouts_when_disconnected(_conn_evt_tx: Sender<ConnectionEvent>,
-                                                            cli_cmd_tx: Sender<ClientCommand>,
+                                                            cli_cmd_tx: ClientCommandSender,
                                                             mut _cli_evt_rx: ClientEventsReceiver)
         {
-            let mut resp_rx = do_rpc_call(&cli_cmd_tx, "path/to/resource", "get", None);
+            let mut resp_rx = cli_cmd_tx
+                .do_rpc_call("path/to/resource", "get")
+                .expect("RpcCall command send");
             receive_rpc_msg(&mut resp_rx).timeout(Duration::from_millis(3000)).await.expect_err("Unexpected method call response");
-        }
-
-        fn do_subscribe(cli_cmd_tx: &Sender<ClientCommand>, path: &str/*, signal_name: &str*/) -> Receiver<RpcFrame> {
-            let (notify_tx, notify_rx) = futures::channel::mpsc::unbounded();
-            cli_cmd_tx.unbounded_send(ClientCommand::Subscribe {
-                path: path.to_string(),
-                notifications_sender: notify_tx,
-            }).expect("RpcCall command send");
-            notify_rx
         }
 
         async fn check_notification_received(notify_rx: &mut Receiver<RpcFrame>, path: Option<&str>, method: Option<&str>, param: Option<&RpcValue>) {
@@ -590,11 +615,13 @@ mod tests {
         }
 
         pub async fn receive_subscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
-                                                     cli_cmd_tx: Sender<ClientCommand>,
+                                                     cli_cmd_tx: ClientCommandSender,
                                                      mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
-            let mut notify_rx = do_subscribe(&cli_cmd_tx, "path/to/resource");
+            let (mut notify_rx, _) = cli_cmd_tx
+                .subscribe("path/to/resource")
+                .expect("ClientCommand subscribe send");
 
             let _subscribe_req = conn_mock.expect_send_message().await;
 
@@ -609,11 +636,13 @@ mod tests {
         }
 
         pub async fn do_not_receive_unsubscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
-                                                              cli_cmd_tx: Sender<ClientCommand>,
+                                                              cli_cmd_tx: ClientCommandSender,
                                                               mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
-            let mut notify_rx = do_subscribe(&cli_cmd_tx, "path/to/resource");
+            let (mut notify_rx, _) = cli_cmd_tx
+                .subscribe("path/to/resource")
+                .expect("ClientCommand subscribe send");
 
             let _subscribe_req = conn_mock.expect_send_message().await;
 
@@ -635,7 +664,7 @@ mod tests {
                 }
             }
 
-            async fn request_handler(rq: RpcMessage, client_cmd_tx: Sender<ClientCommand>) {
+            async fn request_handler(rq: RpcMessage, client_cmd_tx: ClientCommandSender) {
                 let mut resp = rq.prepare_response().unwrap();
                 match rq.method() {
                     Some(crate::clientnode::METH_LS) => {
@@ -653,7 +682,7 @@ mod tests {
                                 format!("Unknown method '{:?}'", rq.method())));
                     }
                 }
-                client_cmd_tx.unbounded_send(ClientCommand::SendMessage{ message: resp }).unwrap();
+                client_cmd_tx.send_message(resp).unwrap();
             }
 
             let mut client = Client::new(DotAppNode::new("test"));
@@ -676,7 +705,7 @@ mod tests {
         }
 
         pub async fn handle_method_calls(conn_evt_tx: Sender<ConnectionEvent>,
-                                         _cli_cmd_tx: Sender<ClientCommand>,
+                                         _cli_cmd_tx: ClientCommandSender,
                                          mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
@@ -787,7 +816,7 @@ mod tests {
     }
 
     generics_def!(TestDriverBounds <C, F, S> where
-                  C: FnOnce(Sender<ConnectionEvent>, Sender<ClientCommand>, ClientEventsReceiver) -> F,
+                  C: FnOnce(Sender<ConnectionEvent>, ClientCommandSender, ClientEventsReceiver) -> F,
                   F: Future + Send + 'static,
                   F::Output: Send + 'static,
                   S: Sync + Send + 'static,

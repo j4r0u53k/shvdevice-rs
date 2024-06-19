@@ -10,7 +10,7 @@ use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{DotAppNode, DotDeviceNode};
 use shvclient::clientnode::{ClientNode, SIG_CHNG};
 use shvclient::RequestHandler;
-use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppData};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -85,7 +85,7 @@ type State = RwLock<i32>;
 
 async fn delay_node_process_request(
     request: RpcMessage,
-    client_cmd_tx: Sender<ClientCommand>,
+    client_cmd_tx: ClientCommandSender,
     mut state: Option<AppData<State>>,
 ) {
     if request.shv_path().unwrap_or_default().is_empty() {
@@ -105,7 +105,7 @@ async fn delay_node_process_request(
             drop(counter);
             futures_time::task::sleep(Duration::from_secs(3)).await;
             resp.set_result(ret_val);
-            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
+            if let Err(e) = client_cmd_tx.send_message(resp) {
                 error!("delay_node_process_request: Cannot send response ({e})");
             }
         });
@@ -114,7 +114,7 @@ async fn delay_node_process_request(
 
 
 async fn emit_chng_task(
-    client_cmd_tx: Sender<ClientCommand>,
+    client_cmd_tx: ClientCommandSender,
     mut client_evt_rx: ClientEventsReceiver,
     app_data: AppData<State>,
 ) -> shv::Result<()> {
@@ -143,7 +143,7 @@ async fn emit_chng_task(
         }
         if emit_signal {
             let sig = RpcMessage::new_signal("status/delayed", SIG_CHNG, Some(cnt.into()));
-            client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: sig })?;
+            client_cmd_tx.send_message(sig)?;
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }

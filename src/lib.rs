@@ -7,10 +7,9 @@ pub mod clientnode;
 pub use client::{
     AppData,
     Client,
-    ClientCommand,
+    ClientCommandSender,
     ClientEvent,
     ClientEventsReceiver,
-    Sender,
     MethodsGetter,
     RequestHandler,
 };

@@ -1,6 +1,6 @@
 use crate::runtime::{current_task_runtime, Runtime};
 use crate::clientnode::METH_PING;
-pub use crate::Sender;
+pub use crate::client::Sender;
 use duration_str::parse;
 use futures::{select, Future, FutureExt, StreamExt};
 use generics_alias::*;

@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::client::{ClientCommand, RequestHandler, Sender, MethodsGetter, AppData};
+use crate::client::{RequestHandler, ClientCommandSender, MethodsGetter, AppData};
 use crate::runtime::spawn_task;
 use log::{error, warn};
 use shv::rpcframe::RpcFrame;
@@ -330,7 +330,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
         Self(NodeVariant::Constant(Box::new(node)))
     }
 
-    pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: Sender<ClientCommand>, app_data: &Option<AppData<T>>) {
+    pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: ClientCommandSender, app_data: &Option<AppData<T>>) {
         match &self.0 {
             NodeVariant::Fixed(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
@@ -409,7 +409,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
     }
 }
 
-fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_tx: &Sender<ClientCommand>, methods: &[&MetaMethod]) -> bool {
+fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_tx: &ClientCommandSender, methods: &[&MetaMethod]) -> bool {
 
     let shv_path = request.shv_path().unwrap_or_default();
     let check_request_access = || {
@@ -446,11 +446,11 @@ fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_
           request.shv_path().unwrap_or_default(),
           err);
     resp.set_error(err);
-    let _ = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp });
+    let _ = client_cmd_tx.send_message(resp);
     false
 }
 
-pub fn send_response(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>, result: Result<RpcValue, RpcError>) {
+pub fn send_response(request: RpcMessage, client_cmd_tx: ClientCommandSender, result: Result<RpcValue, RpcError>) {
     match request.prepare_response() {
         Err(err) => {
             error!("Cannot prepare response. Error: {err}, request: {request}");
@@ -460,7 +460,7 @@ pub fn send_response(request: RpcMessage, client_cmd_tx: Sender<ClientCommand>, 
                 Ok(result) => resp.set_result(result),
                 Err(err) => resp.set_error(err),
             };
-            if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
+            if let Err(e) = client_cmd_tx.send_message(resp) {
                 error!("Cannot send response. Error: {e}, request: {request}");
             }
         }
@@ -482,7 +482,7 @@ pub const METH_SET: &str = "set";
 pub const SIG_CHNG: &str = "chng";
 pub const METH_PING: &str = "ping";
 
-pub const DIR_LS_METHODS: [MetaMethod; 2] = [
+pub(crate) const DIR_LS_METHODS: [MetaMethod; 2] = [
     MetaMethod {
         name: METH_DIR,
         flags: Flag::None as u32,
@@ -560,7 +560,7 @@ macro_rules! fixed_node {
                 },)+
             ];
 
-            async fn $fn_name($request: RpcMessage, $client_cmd_tx: Sender<ClientCommand> $(, $app_state: Option<AppData<$T>>)?) {
+            async fn $fn_name($request: RpcMessage, $client_cmd_tx: ClientCommandSender $(, $app_state: Option<AppData<$T>>)?) {
 
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
@@ -584,7 +584,7 @@ macro_rules! fixed_node {
                             __resp.set_error(err);
                         }
 
-                        if let Err(e) = __client_cmd_tx_clone.unbounded_send($crate::client::ClientCommand::SendMessage { message: __resp }) {
+                        if let Err(e) = __client_cmd_tx_clone.send_message(__resp) {
                             error!("{}: Cannot send response ({e})", stringify!($fn_name));
                         }
                     }
@@ -694,7 +694,7 @@ mod tests {
         );
     }
 
-    async fn dummy_handler(_: RpcMessage, _: Sender<ClientCommand>, _: Option<AppData<()>>) {}
+    async fn dummy_handler(_: RpcMessage, _: ClientCommandSender, _: Option<AppData<()>>) {}
 
     #[test]
     fn accept_valid_routes() {

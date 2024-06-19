@@ -9,7 +9,7 @@ use shv::{client::ClientConfig, util::parse_log_verbosity};
 use shv::{RpcMessage, RpcMessageMetaTags};
 use shvclient::{no_response, MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
-use shvclient::{ClientCommand, ClientEvent, ClientEventsReceiver, Route, Sender, AppData};
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppData};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -72,7 +72,7 @@ fn load_client_config(cli_opts: &Opts) -> shv::Result<ClientConfig> {
 type State = RwLock<i32>;
 
 async fn emit_chng_task(
-    client_cmd_tx: Sender<ClientCommand>,
+    client_cmd_tx: ClientCommandSender,
     mut client_evt_rx: ClientEventsReceiver,
     app_data: AppData<State>,
 ) -> shv::Result<()> {
@@ -101,8 +101,7 @@ async fn emit_chng_task(
         }
         if emit_signal {
             let sig = RpcMessage::new_signal("status/delayed", SIG_CHNG, Some(cnt.into()));
-            // dev_cmd_tx.send(DeviceCommand::SendMessage { message: sig }).await?;
-            client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: sig })?;
+            client_cmd_tx.send_message(sig)?;
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
@@ -132,7 +131,7 @@ pub(crate) async fn main() -> shv::Result<()> {
     async fn dyn_methods_getter(_path: String, _: Option<AppData<RwLock<i32>>>) -> Option<Vec<&'static MetaMethod>> {
         Some(PROPERTY_METHODS.iter().collect())
     }
-    async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: Sender<ClientCommand>) {
+    async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: ClientCommandSender) {
     }
 
     let stateless_node = shvclient::fixed_node!{
@@ -165,7 +164,7 @@ pub(crate) async fn main() -> shv::Result<()> {
                     drop(counter);
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     resp.set_result(ret_val);
-                    if let Err(e) = client_cmd_tx.unbounded_send(ClientCommand::SendMessage { message: resp }) {
+                    if let Err(e) = client_cmd_tx.send_message(resp) {
                         error!("delay_node_process_request: Cannot send response ({e})");
                     }
                 });
