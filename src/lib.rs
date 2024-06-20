@@ -5,7 +5,7 @@ pub mod runtime;
 pub mod clientnode;
 
 pub use client::{
-    AppData,
+    AppState,
     Client,
     ClientCommandSender,
     ClientEvent,

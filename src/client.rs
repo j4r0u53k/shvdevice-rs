@@ -130,24 +130,24 @@ pub enum ClientCommand {
 
 const BROKER_APP_NODE: &str = ".broker/app";
 
-pub struct MethodsGetter<T>(pub(crate) Box<dyn Fn(String, Option<AppData<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>);
+pub struct MethodsGetter<T>(pub(crate) Box<dyn Fn(String, Option<AppState<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>);
 
 impl<T> MethodsGetter<T> {
     pub fn new<F, Fut>(func: F) -> Self
     where
-        F: Fn(String, Option<AppData<T>>) -> Fut + Sync + Send + 'static,
+        F: Fn(String, Option<AppState<T>>) -> Fut + Sync + Send + 'static,
         Fut: Future<Output=Option<Vec<&'static MetaMethod>>> + Send + 'static,
     {
         Self(Box::new(move |path, data| Box::pin(func(path, data))))
     }
 }
 
-pub struct RequestHandler<T>(pub(crate) Box<dyn Fn(RpcMessage, ClientCommandSender, Option<AppData<T>>) -> BoxFuture<'static, ()> + Sync + Send>);
+pub struct RequestHandler<T>(pub(crate) Box<dyn Fn(RpcMessage, ClientCommandSender, Option<AppState<T>>) -> BoxFuture<'static, ()> + Sync + Send>);
 
 impl<T> RequestHandler<T> {
     pub fn stateful<F, Fut>(func: F) -> Self
     where
-        F: Fn(RpcMessage, ClientCommandSender, Option<AppData<T>>) -> Fut + Sync + Send + 'static,
+        F: Fn(RpcMessage, ClientCommandSender, Option<AppState<T>>) -> Fut + Sync + Send + 'static,
         Fut: Future<Output=()> + Send + 'static
     {
         Self(Box::new(move |req, tx, data| Box::pin(func(req, tx, data))))
@@ -189,28 +189,28 @@ impl ClientEventsReceiver {
     }
 }
 
-pub struct AppData<T: ?Sized>(Arc<T>);
+pub struct AppState<T: ?Sized>(Arc<T>);
 
-impl<T> AppData<T> {
+impl<T> AppState<T> {
     pub fn new(data: T) -> Self {
         Self(Arc::new(data))
     }
 }
 
-impl<T: ?Sized> std::ops::Deref for AppData<T> {
+impl<T: ?Sized> std::ops::Deref for AppState<T> {
     type Target = Arc<T>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<T: ?Sized> Clone for AppData<T> {
+impl<T: ?Sized> Clone for AppState<T> {
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
     }
 }
 
-impl<T: ?Sized> From<Arc<T>> for AppData<T> {
+impl<T: ?Sized> From<Arc<T>> for AppState<T> {
     fn from(value: Arc<T>) -> Self {
         Self(value)
     }
@@ -281,14 +281,14 @@ impl Subscriptions {
 
 pub struct Client<T> {
     mounts: BTreeMap<String, ClientNode<'static, T>>,
-    app_data: Option<AppData<T>>,
+    app_state: Option<AppState<T>>,
 }
 
 impl<T: Send + Sync + 'static> Client<T> {
     pub fn new(app_node: crate::appnodes::DotAppNode) -> Self {
         let mut client = Self {
             mounts: Default::default(),
-            app_data: Default::default(),
+            app_state: Default::default(),
         };
         client.mount(".app", ClientNode::constant(app_node));
         client
@@ -323,8 +323,8 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn with_app_data(&mut self, app_data: AppData<T>) -> &mut Self {
-        self.app_data = Some(app_data);
+    pub fn with_app_state(&mut self, app_state: AppState<T>) -> &mut Self {
+        self.app_state = Some(app_state);
         self
     }
 
@@ -482,7 +482,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                             if let Some((mount, path)) = find_longest_prefix(&self.mounts, shv_path) {
                                 request_msg.set_shvpath(path);
                                 let node = self.mounts.get(mount).unwrap_or_else(|| panic!("A node on path '{mount}' should exist"));
-                                node.process_request(request_msg, mount.to_owned(), client_cmd_tx.clone(), &self.app_data).await;
+                                node.process_request(request_msg, mount.to_owned(), client_cmd_tx.clone(), &self.app_state).await;
                             } else {
                                 let method = frame.method().unwrap_or_default();
                                 resp.set_error(RpcError::new(
@@ -868,7 +868,7 @@ mod tests {
         // Request handling tests
         //
         pub fn make_client_with_handlers() -> Client<()> {
-            async fn methods_getter(path: String, _: Option<AppData<()>>) -> Option<Vec<&'static MetaMethod>> {
+            async fn methods_getter(path: String, _: Option<AppState<()>>) -> Option<Vec<&'static MetaMethod>> {
                 if path.is_empty() {
                     Some(PROPERTY_METHODS.iter().collect())
                 } else {

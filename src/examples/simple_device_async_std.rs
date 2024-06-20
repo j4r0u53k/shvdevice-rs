@@ -10,7 +10,7 @@ use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{DotAppNode, DotDeviceNode};
 use shvclient::clientnode::{ClientNode, SIG_CHNG};
 use shvclient::RequestHandler;
-use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppData};
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppState};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -86,7 +86,7 @@ type State = RwLock<i32>;
 async fn delay_node_process_request(
     request: RpcMessage,
     client_cmd_tx: ClientCommandSender,
-    mut state: Option<AppData<State>>,
+    mut state: Option<AppState<State>>,
 ) {
     if request.shv_path().unwrap_or_default().is_empty() {
         assert_eq!(request.method(), Some(METH_GET_DELAYED));
@@ -116,7 +116,7 @@ async fn delay_node_process_request(
 async fn emit_chng_task(
     client_cmd_tx: ClientCommandSender,
     mut client_evt_rx: ClientEventsReceiver,
-    app_data: AppData<State>,
+    app_state: AppState<State>,
 ) -> shvrpc::Result<()> {
     info!("signal task started");
 
@@ -147,7 +147,7 @@ async fn emit_chng_task(
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
-        let state = app_data.read().await;
+        let state = app_state.read().await;
         info!("state: {state}");
     }
 }
@@ -163,7 +163,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = AppData::new(RwLock::new(-10));
+    let counter = AppState::new(RwLock::new(-10));
     let cnt = counter.clone();
 
     let app_tasks = move |client_cmd_tx, client_evt_rx| {
@@ -178,7 +178,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
                     RequestHandler::stateful(delay_node_process_request),
                 )]
         ))
-        .with_app_data(cnt)
+        .with_app_state(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)
         .await

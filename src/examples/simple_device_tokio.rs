@@ -9,7 +9,7 @@ use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvclient::{no_response, MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
-use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppData};
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppState};
 use simple_logger::SimpleLogger;
 
 #[derive(Parser, Debug)]
@@ -74,7 +74,7 @@ type State = RwLock<i32>;
 async fn emit_chng_task(
     client_cmd_tx: ClientCommandSender,
     mut client_evt_rx: ClientEventsReceiver,
-    app_data: AppData<State>,
+    app_state: AppState<State>,
 ) -> shvrpc::Result<()> {
     info!("signal task started");
 
@@ -105,7 +105,7 @@ async fn emit_chng_task(
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
-        let state = app_data.read().await;
+        let state = app_state.read().await;
         info!("state: {state}");
     }
 }
@@ -121,14 +121,14 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     let client_config = load_client_config(&cli_opts).expect("Invalid config");
 
-    let counter = AppData::new(RwLock::new(-10));
+    let counter = AppState::new(RwLock::new(-10));
     let cnt = counter.clone();
 
     let app_tasks = move |client_cmd_tx, client_evt_rx| {
         tokio::task::spawn(emit_chng_task(client_cmd_tx, client_evt_rx, counter));
     };
 
-    async fn dyn_methods_getter(_path: String, _: Option<AppData<RwLock<i32>>>) -> Option<Vec<&'static MetaMethod>> {
+    async fn dyn_methods_getter(_path: String, _: Option<AppState<RwLock<i32>>>) -> Option<Vec<&'static MetaMethod>> {
         Some(PROPERTY_METHODS.iter().collect())
     }
     async fn dyn_handler(_request: RpcMessage, _client_cmd_tx: ClientCommandSender) {
@@ -147,12 +147,12 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
     };
 
     let delay_node = shvclient::fixed_node!(
-        delay_handler<State>(request, client_cmd_tx, app_data) {
+        delay_handler<State>(request, client_cmd_tx, app_state) {
             "getDelayed" [IsGetter, Browse] => {
                 let mut resp = request.prepare_response().unwrap_or_default();
                 tokio::task::spawn(async move {
-                    let mut app_data = app_data;
-                    let mut counter = app_data
+                    let mut app_state = app_state;
+                    let mut counter = app_state
                         .as_mut()
                         .expect("Missing state for delay node")
                         .write()
@@ -185,7 +185,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
         .mount("status/dyn", ClientNode::dynamic(
                 MethodsGetter::new(dyn_methods_getter),
                 RequestHandler::stateless(dyn_handler)))
-        .with_app_data(cnt)
+        .with_app_state(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)
         .await

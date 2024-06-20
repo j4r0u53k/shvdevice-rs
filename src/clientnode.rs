@@ -1,7 +1,7 @@
 // The file originates from https://github.com/silicon-heaven/shv-rs/blob/e740fd301dc65f3412ad1154595bf61ee5632aba/src/shvnode.rs
 // struct ShvNode has been adapted to support async process_request accepting RpcCommand channel and a shared state params
 
-use crate::client::{RequestHandler, ClientCommandSender, MethodsGetter, AppData};
+use crate::client::{RequestHandler, ClientCommandSender, MethodsGetter, AppState};
 use crate::runtime::spawn_task;
 use log::{error, warn};
 use shvrpc::rpcframe::RpcFrame;
@@ -330,7 +330,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
         Self(NodeVariant::Constant(Box::new(node)))
     }
 
-    pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: ClientCommandSender, app_data: &Option<AppData<T>>) {
+    pub(crate) async fn process_request(&self, request: RpcMessage, mount_path: String, client_cmd_tx: ClientCommandSender, app_state: &Option<AppState<T>>) {
         match &self.0 {
             NodeVariant::Fixed(node) => {
                 let methods = if request.shv_path().unwrap_or_default().is_empty() {
@@ -348,7 +348,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
                         let result = dir(methods.iter().copied(), request.param().into());
                         send_response(request, client_cmd_tx, Ok(result));
                     } else if let Some(handler) = node.handlers.get(method) {
-                        spawn_task(handler.0(request, client_cmd_tx, app_data.clone()));
+                        spawn_task(handler.0(request, client_cmd_tx, app_state.clone()));
                     } else if method == self::METH_LS {
                         let result = default_ls(request.param());
                         send_response(request, client_cmd_tx, Ok(result));
@@ -358,11 +358,11 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
                 }
             },
             NodeVariant::Dynamic(node) => {
-                let app_data = app_data.clone();
+                let app_state = app_state.clone();
                 let shv_path = request.shv_path().unwrap_or_default().to_owned();
                 let node = node.clone();
                 spawn_task(async move {
-                    let methods = node.methods.0(shv_path, app_data.clone()).await
+                    let methods = node.methods.0(shv_path, app_state.clone()).await
                         .map_or_else(
                             Vec::new,
                             |m| DIR_LS_METHODS.iter().chain(m).collect());
@@ -373,7 +373,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
                                 send_response(request, client_cmd_tx, Ok(result));
                             }
                             Some(_) =>
-                                node.handler.0(request, client_cmd_tx, app_data).await,
+                                node.handler.0(request, client_cmd_tx, app_state).await,
                             _ =>
                                 panic!("BUG: Request method should be Some after access check."),
                         };
@@ -560,7 +560,7 @@ macro_rules! fixed_node {
                 },)+
             ];
 
-            async fn $fn_name($request: RpcMessage, $client_cmd_tx: ClientCommandSender $(, $app_state: Option<AppData<$T>>)?) {
+            async fn $fn_name($request: RpcMessage, $client_cmd_tx: ClientCommandSender $(, $app_state: Option<AppState<$T>>)?) {
 
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
@@ -607,7 +607,7 @@ macro_rules! request_handler {
     ($fn_name:ident) => {
         RequestHandler::stateless($fn_name)
     };
-    ($fn_name:ident, $app_data:ident) => {
+    ($fn_name:ident, $app_state:ident) => {
         RequestHandler::stateful($fn_name)
     };
 }
@@ -639,10 +639,10 @@ macro_rules! method_handler {
 // Usage example:
 //
 //  let node = fixed_node!{
-//         device_handler<i32>(request, client_cmd_tx, app_data) {
+//         device_handler<i32>(request, client_cmd_tx, app_state) {
 //             "name" [IsGetter, Browse] (param: Int) => {
 //                 println!("param: {}", param);
-//                 app_data.map(|v| { println!("app_data: {}", *v); });
+//                 app_state.map(|v| { println!("app_state: {}", *v); });
 //                 Some(Ok(RpcValue::from("name result")))
 //             }
 //             "version" [IsGetter, Browse] => {
@@ -652,7 +652,7 @@ macro_rules! method_handler {
 //     }
 // }
 //
-// Type in < > and app_data parameres are optional.
+// Type in < > and app_state parameres are optional.
 //
 // TODO: documentation
 //
@@ -694,7 +694,7 @@ mod tests {
         );
     }
 
-    async fn dummy_handler(_: RpcMessage, _: ClientCommandSender, _: Option<AppData<()>>) {}
+    async fn dummy_handler(_: RpcMessage, _: ClientCommandSender, _: Option<AppState<()>>) {}
 
     #[test]
     fn accept_valid_routes() {
