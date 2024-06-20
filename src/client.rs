@@ -31,28 +31,38 @@ mod sealed {
 }
 use sealed::next_subscription_id;
 
+pub struct NotificationsReceiver {
+    notifications_rx: Receiver<RpcFrame>,
+    // For unsubscribe on drop
+    client_cmd_tx: Sender<ClientCommand>,
+    path: String,
+    signal: String,
+    subscription_id: u64,
+}
+
+impl NotificationsReceiver {
+    pub fn next(&mut self) -> futures::prelude::stream::Next<'_, Receiver<RpcFrame>> {
+        self.notifications_rx.next()
+    }
+}
+
+impl Drop for NotificationsReceiver {
+    fn drop(&mut self) {
+        if let Err(err) = self.client_cmd_tx.unbounded_send(
+            ClientCommand::Unsubscribe {
+                path: self.path.clone(),
+                signal: self.signal.clone(),
+                subscription_id: self.subscription_id,
+            }) {
+            warn!("Cannot unsubscribe path {}, signal {}, error: {}", &self.path, &self.signal, err);
+        };
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientCommandSender {
     pub(crate) sender: Sender<ClientCommand>,
 }
-
-// pub struct NotificationsReceiver {
-//     rx_channel: Receiver<RpcFrame>,
-//     unsubscriber: Box<dyn FnOnce() -> Result<(), TrySendError<ClientCommand>>>,
-// }
-//
-// impl NotificationsReceiver {
-//     pub fn recv(&mut self) -> futures::prelude::stream::Next<'_, Receiver<RpcFrame>> {
-//         self.rx_channel.next()
-//     }
-// }
-//
-// impl Drop for NotificationsReceiver {
-//     fn drop(&mut self) {
-//         let u = self.unsubscriber.clone();
-//         u.deref
-//     }
-// }
 
 impl ClientCommandSender {
     pub fn do_rpc_call_param<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>, param: Option<RpcValue>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
@@ -72,7 +82,7 @@ impl ClientCommandSender {
         self.sender.unbounded_send(ClientCommand::SendMessage { message })
     }
 
-    pub fn subscribe(&self, path: impl Into<String>, signal: impl Into<String>) -> Result<(Receiver<RpcFrame>, impl FnOnce() -> Result<(), TrySendError<ClientCommand>>), TrySendError<ClientCommand>> {
+    pub fn subscribe(&self, path: impl Into<String>, signal: impl Into<String>) -> Result<NotificationsReceiver, TrySendError<ClientCommand>> {
         let path = path.into();
         let signal = signal.into();
         let subscription_id = next_subscription_id();
@@ -85,16 +95,13 @@ impl ClientCommandSender {
                 notifications_sender
             }
         ).map(move |_| {
-            let client_cmd_sender = self.sender.clone();
-
-            (notifications_receiver,
-             move || { client_cmd_sender.unbounded_send(
-                 ClientCommand::Unsubscribe {
-                     path,
-                     signal,
-                     subscription_id
-                 })
-             })
+            NotificationsReceiver {
+                notifications_rx: notifications_receiver,
+                client_cmd_tx: self.sender.clone(),
+                path,
+                signal,
+                subscription_id,
+            }
         })
     }
 }
@@ -255,7 +262,10 @@ impl Subscriptions {
         };
 
         if removed_last.is_none() {
-            warn!("Remove non-existing subscription for path: {}, signal: {}, id: {}. Dump: {:?}",
+            // NOTE: On broker Disconnect all subscriptions are cleared.
+            // If there is any NotificationsReceiver that gets dropped,
+            // it will try to remove the subscription again.
+            debug!("Remove non-existing subscription for path: {}, signal: {}, id: {}. Dump: {:?}",
                 &path, &signal, &subscription_id, &self);
         }
 
@@ -682,6 +692,10 @@ mod tests {
             rx.next().await.unwrap().to_rpcmesage().unwrap()
         }
 
+        async fn receive_notification(rx: &mut NotificationsReceiver) -> RpcMessage {
+            rx.next().await.unwrap().to_rpcmesage().unwrap()
+        }
+
         pub async fn call_method_and_receive_response(conn_evt_tx: Sender<ConnectionEvent>,
                                                   cli_cmd_tx: ClientCommandSender,
                                                   mut cli_evt_rx: ClientEventsReceiver)
@@ -709,8 +723,10 @@ mod tests {
             receive_rpc_msg(&mut resp_rx).timeout(Duration::from_millis(3000)).await.expect_err("Unexpected method call response");
         }
 
-        async fn check_notification_received(notify_rx: &mut Receiver<RpcFrame>, path: Option<&str>, method: Option<&str>, param: Option<&RpcValue>) {
-            let received_msg = receive_rpc_msg(notify_rx).await;
+        async fn check_notification_received(notify_rx: &mut NotificationsReceiver, path: Option<&str>, method: Option<&str>, param: Option<&RpcValue>) {
+            let received_msg = receive_notification(notify_rx)
+                .timeout(Duration::from_millis(100)).await
+                .unwrap_or_else(|_| panic!("Notification for path `{:?}`, signal `{:?}` not received", &path, &method));
             assert!(received_msg.is_signal());
             assert_eq!(received_msg.shv_path(), path);
             assert_eq!(received_msg.method(), method);
@@ -722,7 +738,7 @@ mod tests {
                                                      mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
-            let (mut notify_rx, _) = cli_cmd_tx
+            let mut notify_rx = cli_cmd_tx
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
@@ -743,7 +759,7 @@ mod tests {
                                                               mut cli_evt_rx: ClientEventsReceiver)
         {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
-            let (mut notify_rx, _) = cli_cmd_tx
+            let mut notify_rx = cli_cmd_tx
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
@@ -751,8 +767,8 @@ mod tests {
 
             conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
 
-            receive_rpc_msg(&mut notify_rx)
-                .timeout(Duration::from_millis(1000)).await
+            receive_notification(&mut notify_rx)
+                .timeout(Duration::from_millis(100)).await
                 .expect_err("Unexpected notification received");
         }
 
