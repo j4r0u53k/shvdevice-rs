@@ -4,16 +4,16 @@
 use crate::client::{RequestHandler, ClientCommandSender, MethodsGetter, AppData};
 use crate::runtime::spawn_task;
 use log::{error, warn};
-use shv::rpcframe::RpcFrame;
-use shv::{metamethod, rpcvalue, RpcMessage, RpcMessageMetaTags};
+use shvrpc::rpcframe::RpcFrame;
+use shvrpc::{metamethod, shvproto::rpcvalue, RpcMessage, RpcMessageMetaTags};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::format;
 use std::rc::Rc;
 use std::sync::Arc;
 // Reexport for use in the macros
-pub use shv::metamethod::{AccessLevel, Flag, MetaMethod};
-pub use shv::rpcmessage::{RpcError, RpcErrorCode};
-pub use shv::rpcvalue::{RpcValue, Value};
+pub use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
+pub use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
+pub use shvrpc::shvproto::{RpcValue, Value};
 
 enum DirParam {
     Brief,

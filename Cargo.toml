@@ -7,23 +7,26 @@ edition = "2021"
 name = "shvclient"
 path = "src/lib.rs"
 
-[[bin]]
+[[example]]
 name = "simple_device_tokio"
 path = "src/examples/simple_device_tokio.rs"
 required-features = ["tokio"]
 
-[[bin]]
+[[example]]
 name = "simple_device_async_std"
 path = "src/examples/simple_device_async_std.rs"
 required-features = ["async_std"]
 
+[dev-dependencies]
+clap = { version = "4.4", features = ["derive"] }
+
 [dependencies]
-shv = { git = "https://github.com/silicon-heaven/shv-rs.git", rev = "0202268d05d7" }
-# shv = { path = "../shv-rs" }
+shvrpc = { git = "https://github.com/j4r0u53k/libshvrpc-rs", rev = "522fef0e4184a336df1ae7a8b67c5c872a158269" }
+
+# FIXME: consider reexporting in shvrpc to use the same version
 futures = "0.3.29"
 async-std = { version = "1.12.0", features = ["attributes"], optional = true }
 url = "2.4.1"
-clap = { version = "4.4.12", features = ["derive"] }
 log = "0.4.20"
 simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
 duration-str = "0.7.1"
@@ -33,7 +36,9 @@ tokio-util = { version = "0.7.10", features = ["compat"], optional = true }
 futures-time = "3.0.0"
 futures-net = "0.6.0"
 generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", branch = "main" }
-# Re-export of proc macros in macro_magic does not work for some reason
+
+# NOTE: macro_magic needs to be as a direct dependency because some functions from
+# there are called in expansion of `generics_inner` macro from generics-alias crate.
 macro_magic = "0.5.0"
 
 [features]

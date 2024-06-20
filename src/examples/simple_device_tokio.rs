@@ -4,9 +4,9 @@ use tokio::sync::RwLock;
 use clap::Parser;
 use futures::{select, FutureExt};
 use log::*;
-use shv::metamethod::MetaMethod;
-use shv::{client::ClientConfig, util::parse_log_verbosity};
-use shv::{RpcMessage, RpcMessageMetaTags};
+use shvrpc::metamethod::MetaMethod;
+use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
+use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvclient::{no_response, MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppData};
@@ -53,7 +53,7 @@ fn init_logger(cli_opts: &Opts) {
     logger.init().unwrap();
 }
 
-fn load_client_config(cli_opts: &Opts) -> shv::Result<ClientConfig> {
+fn load_client_config(cli_opts: &Opts) -> shvrpc::Result<ClientConfig> {
     let mut config = if let Some(config_file) = &cli_opts.config {
         ClientConfig::from_file_or_default(config_file, cli_opts.create_default_config)?
     } else {
@@ -75,7 +75,7 @@ async fn emit_chng_task(
     client_cmd_tx: ClientCommandSender,
     mut client_evt_rx: ClientEventsReceiver,
     app_data: AppData<State>,
-) -> shv::Result<()> {
+) -> shvrpc::Result<()> {
     info!("signal task started");
 
     let mut cnt = 0;
@@ -111,7 +111,7 @@ async fn emit_chng_task(
 }
 
 #[tokio::main]
-pub(crate) async fn main() -> shv::Result<()> {
+pub(crate) async fn main() -> shvrpc::Result<()> {
     let cli_opts = Opts::parse();
     init_logger(&cli_opts);
 
@@ -138,10 +138,10 @@ pub(crate) async fn main() -> shv::Result<()> {
         device_handler(request, client_cmd_tx) {
             "something" [IsGetter, Browse] (param: Int) => {
                 println!("param: {}", param);
-                Some(Ok(shv::RpcValue::from("name result")))
+                Some(Ok(shvrpc::RpcValue::from("name result")))
             }
             "42" [IsGetter, Browse] => {
-                Some(Ok(shv::RpcValue::from(42)))
+                Some(Ok(shvrpc::RpcValue::from(42)))
             }
         }
     };
@@ -174,7 +174,7 @@ pub(crate) async fn main() -> shv::Result<()> {
                 no_response!()
 
                 // Otherwise, return either RpcValue or RpcError
-                // Some(Ok(shv::RpcValue::from(true)))
+                // Some(Ok(shvrpc::RpcValue::from(true)))
             }
         }
     );

@@ -4,9 +4,9 @@ use clap::Parser;
 use futures::{select, FutureExt};
 use futures_time::time::Duration;
 use log::*;
-use shv::metamethod::{Flag, MetaMethod};
-use shv::{client::ClientConfig, util::parse_log_verbosity};
-use shv::{RpcMessage, RpcMessageMetaTags};
+use shvrpc::metamethod::{Flag, MetaMethod};
+use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
+use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvclient::appnodes::{DotAppNode, DotDeviceNode};
 use shvclient::clientnode::{ClientNode, SIG_CHNG};
 use shvclient::RequestHandler;
@@ -54,7 +54,7 @@ fn init_logger(cli_opts: &Opts) {
     logger.init().unwrap();
 }
 
-fn load_client_config(cli_opts: &Opts) -> shv::Result<ClientConfig> {
+fn load_client_config(cli_opts: &Opts) -> shvrpc::Result<ClientConfig> {
     let mut config = if let Some(config_file) = &cli_opts.config {
         ClientConfig::from_file_or_default(config_file, cli_opts.create_default_config)?
     } else {
@@ -75,7 +75,7 @@ const METH_GET_DELAYED: &str = "getDelayed";
 const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
     name: METH_GET_DELAYED,
     flags: Flag::IsGetter as u32,
-    access: shv::metamethod::AccessLevel::Browse,
+    access: shvrpc::metamethod::AccessLevel::Browse,
     param: "",
     result: "",
     description: "",
@@ -117,7 +117,7 @@ async fn emit_chng_task(
     client_cmd_tx: ClientCommandSender,
     mut client_evt_rx: ClientEventsReceiver,
     app_data: AppData<State>,
-) -> shv::Result<()> {
+) -> shvrpc::Result<()> {
     info!("signal task started");
 
     let mut cnt = 0;
@@ -153,7 +153,7 @@ async fn emit_chng_task(
 }
 
 #[async_std::main]
-pub(crate) async fn main() -> shv::Result<()> {
+pub(crate) async fn main() -> shvrpc::Result<()> {
     let cli_opts = Opts::parse();
     init_logger(&cli_opts);
 

@@ -5,12 +5,12 @@ use duration_str::parse;
 use futures::{select, Future, FutureExt, StreamExt};
 use generics_alias::*;
 use log::*;
-pub use shv::client::ClientConfig;
-use shv::client::LoginParams;
-use shv::framerw::{FrameReader, FrameWriter};
-use shv::rpcframe::RpcFrame;
-use shv::util::login_from_url;
-use shv::{client, RpcMessage};
+pub use shvrpc::client::ClientConfig;
+use shvrpc::client::LoginParams;
+use shvrpc::framerw::{FrameReader, FrameWriter};
+use shvrpc::rpcframe::RpcFrame;
+use shvrpc::util::login_from_url;
+use shvrpc::{client, RpcMessage};
 use url::Url;
 
 pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
@@ -37,7 +37,7 @@ mod tokio {
 
     async fn connect(
         address: String,
-    ) -> shv::Result<(Compat<BufReader<OwnedReadHalf>>, Compat<OwnedWriteHalf>)>
+    ) -> shvrpc::Result<(Compat<BufReader<OwnedReadHalf>>, Compat<OwnedWriteHalf>)>
     {
         let stream = TcpStream::connect(address).await?;
         let (reader, writer) = stream.into_split();
@@ -63,7 +63,7 @@ mod async_std {
 
     async fn connect(
         address: String,
-    ) -> shv::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)> {
+    ) -> shvrpc::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)> {
         let stream = TcpStream::connect(address).await?;
         let (reader, writer) = stream.split();
         let reader = BufReader::new(reader);
@@ -83,14 +83,14 @@ pub enum ConnectionCommand {
 
 generics_def!(
     ConnectBounds<
-        F: Future<Output = shv::Result<(R, W)>>,
+        F: Future<Output = shvrpc::Result<(R, W)>>,
         R: futures::AsyncRead + Send + Unpin,
         W: futures::AsyncWrite + Send + Unpin,
     >
 );
 
 #[generics(ConnectBounds)]
-async fn connection_task<C>(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, connect: C) -> shv::Result<()>
+async fn connection_task<C>(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, connect: C) -> shvrpc::Result<()>
 where
     C: FnOnce(String) -> F + Clone,
 {
@@ -136,7 +136,7 @@ async fn connection_loop<C>(
     config: &ClientConfig,
     conn_event_sender: &Sender<ConnectionEvent>,
     connect: C,
-) -> shv::Result<()>
+) -> shvrpc::Result<()>
 where
     C: FnOnce(String) -> F,
 {
@@ -153,8 +153,8 @@ where
     // Establish a connection
     info!("Connecting to: {address}");
     let (reader, writer) = connect(address).await?;
-    let mut frame_reader = shv::streamrw::StreamFrameReader::new(reader);
-    let mut frame_writer = shv::streamrw::StreamFrameWriter::new(writer);
+    let mut frame_reader = shvrpc::streamrw::StreamFrameReader::new(reader);
+    let mut frame_writer = shvrpc::streamrw::StreamFrameWriter::new(writer);
 
     // login
     let (user, password) = login_from_url(&url);
@@ -175,7 +175,7 @@ where
     let (conn_cmd_sender, mut conn_cmd_receiver) = futures::channel::mpsc::unbounded();
     conn_event_sender.unbounded_send(ConnectionEvent::Connected(conn_cmd_sender.clone()))?;
 
-    let res: shv::Result<()> = async move {
+    let res: shvrpc::Result<()> = async move {
         let mut fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
         let mut next_conn_cmd = conn_cmd_receiver.next().fuse();
         let mut fut_receive_frame = frame_reader.receive_frame().fuse();

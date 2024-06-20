@@ -5,11 +5,12 @@ use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
 use futures::channel::mpsc::TrySendError;
 use log::*;
-use shv::client::ClientConfig;
-use shv::metamethod::MetaMethod;
-use shv::rpcframe::RpcFrame;
-use shv::rpcmessage::{RpcError, RpcErrorCode};
-use shv::{make_map, rpcvalue, RpcMessage, RpcMessageMetaTags, RpcValue};
+use shvrpc::client::ClientConfig;
+use shvrpc::metamethod::MetaMethod;
+use shvrpc::rpcframe::RpcFrame;
+use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
+use shvrpc::{RpcMessage, RpcMessageMetaTags};
+use shvrpc::shvproto::RpcValue;
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -326,7 +327,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         &mut self,
         config: &ClientConfig,
         init_handler: Option<H>,
-    ) -> shv::Result<()>
+    ) -> shvrpc::Result<()>
     where
         H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
@@ -335,7 +336,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         self.client_loop(conn_evt_rx, init_handler).await
     }
 
-    pub async fn run(&mut self, config: &ClientConfig) -> shv::Result<()> {
+    pub async fn run(&mut self, config: &ClientConfig) -> shvrpc::Result<()> {
         self.run_with_init_opt(
             config,
             Option::<fn(ClientCommandSender, ClientEventsReceiver)>::None,
@@ -343,7 +344,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         .await
     }
 
-    pub async fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shv::Result<()>
+    pub async fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shvrpc::Result<()>
     where
         H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
@@ -354,7 +355,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         &mut self,
         mut conn_events_rx: Receiver<ConnectionEvent>,
         init_handler: Option<H>,
-    ) -> shv::Result<()>
+    ) -> shvrpc::Result<()>
     where
         H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
@@ -397,7 +398,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                             },
                             Subscribe { path, signal, subscription_id, notifications_sender } => {
                                 if subscriptions.add(&path, &signal, subscription_id, notifications_sender) {
-                                    let request = create_subscription_request(&path, SubscriptionRequest::Subscribe);
+                                    let request = create_subscription_request(&path, &signal, SubscriptionRequest::Subscribe);
                                     client_cmd_tx
                                         .send_message(request)
                                         .expect("Cannot send subscription request through ClientCommand channel");
@@ -407,7 +408,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                             },
                             Unsubscribe { path, signal, subscription_id } => {
                                 if subscriptions.remove(&path, &signal, subscription_id) {
-                                    let request = create_subscription_request(&path, SubscriptionRequest::Unsubscribe);
+                                    let request = create_subscription_request(&path, &signal, SubscriptionRequest::Unsubscribe);
                                     client_cmd_tx
                                         .send_message(request)
                                         .expect("Cannot send subscription request through ClientCommand channel");
@@ -465,7 +466,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         client_cmd_tx: &ClientCommandSender,
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
         subscriptions: &mut Subscriptions,
-    ) -> shv::Result<()> {
+    ) -> shvrpc::Result<()> {
         if frame.is_request() {
             if let Ok(mut request_msg) = frame.to_rpcmesage() {
                 if let Ok(mut resp) = request_msg.prepare_response() {
@@ -543,14 +544,19 @@ enum SubscriptionRequest {
     Unsubscribe,
 }
 
-fn create_subscription_request(path: &str, request: SubscriptionRequest) -> RpcMessage {
+fn create_subscription_request(path: &str, signal: &str, request: SubscriptionRequest) -> RpcMessage {
     RpcMessage::new_request(
         BROKER_APP_NODE,
         match request {
             SubscriptionRequest::Subscribe => METH_SUBSCRIBE,
             SubscriptionRequest::Unsubscribe => METH_UNSUBSCRIBE,
         },
-        Some(make_map!("methods" => "", "path" => path).into()),
+        Some({
+            let mut map = shvrpc::shvproto::Map::new();
+            map.insert("methods".to_string(), signal.into());
+            map.insert("path".to_string(),path.into());
+            map.into()
+        })
     )
 }
 
@@ -566,7 +572,7 @@ mod tests {
         use futures_time::future::FutureExt;
         use futures_time::time::Duration;
         use crate::clientnode::{SIG_CHNG, PROPERTY_METHODS};
-        use shv::metamethod::AccessLevel;
+        use shvrpc::metamethod::AccessLevel;
 
         struct ConnectionMock {
             conn_evt_tx: Sender<ConnectionEvent>,
@@ -843,6 +849,11 @@ mod tests {
                 .expect("Unsubscribe request timeout");
             assert_eq!(unsubscribe_req.shv_path(), Some(".broker/app"));
             assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
+            let shvrpc::shvproto::Value::Map(params) = unsubscribe_req.param().expect("Unsubscribe request has param").value() else {
+                panic!("Unsubscribe params is not a map");
+            };
+            assert_eq!(params.get("methods").map(shvrpc::shvproto::RpcValue::as_str), Some(SIG_CHNG));
+            assert_eq!(params.get("path").map(shvrpc::shvproto::RpcValue::as_str), Some("path/to/resource"));
         }
 
         // Request handling tests

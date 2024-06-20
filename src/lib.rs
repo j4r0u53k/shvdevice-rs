@@ -1,7 +1,7 @@
 pub mod appnodes;
 pub mod client;
 mod connection;
-mod runtime;
+pub mod runtime;
 pub mod clientnode;
 
 pub use client::{

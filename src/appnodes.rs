@@ -1,7 +1,7 @@
 
 use crate::clientnode::{ConstantNode, METH_PING};
-use shv::metamethod::{AccessLevel, Flag, MetaMethod};
-use shv::{RpcMessageMetaTags, RpcMessage, RpcValue};
+use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
+use shvrpc::{RpcMessageMetaTags, RpcMessage, shvproto::RpcValue, rpcmessage::RpcError};
 
 const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
 const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
@@ -68,7 +68,7 @@ impl ConstantNode for DotAppNode {
         DOT_APP_METHODS.iter().collect()
     }
 
-    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, shv::rpcmessage::RpcError>> {
+    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, RpcError>> {
         match request.method() {
             Some(METH_SHV_VERSION_MAJOR) => Some(self.shv_version_major.into()),
             Some(METH_SHV_VERSION_MINOR) => Some(self.shv_version_minor.into()),
@@ -127,7 +127,7 @@ impl ConstantNode for DotDeviceNode {
         DOT_DEVICE_METHODS.iter().collect()
     }
 
-    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, shv::rpcmessage::RpcError>> {
+    fn process_request(&self, request: &RpcMessage) -> Option<Result<RpcValue, RpcError>> {
         match request.method() {
             Some(METH_NAME) => Some(RpcValue::from(&self.device_name)),
             Some(METH_VERSION) => Some(RpcValue::from(&self.version)),
