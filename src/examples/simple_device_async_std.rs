@@ -61,12 +61,12 @@ fn load_client_config(cli_opts: &Opts) -> shvrpc::Result<ClientConfig> {
         Default::default()
     };
     if let Some(url) = &cli_opts.url {
-        config.url = url.clone()
+        config.url.clone_from(url);
     }
-    config.device_id = cli_opts.device_id.clone();
-    config.mount = cli_opts.mount.clone();
-    config.reconnect_interval = cli_opts.reconnect_interval.clone();
-    config.heartbeat_interval = cli_opts.heartbeat_interval.clone();
+    config.device_id.clone_from(&cli_opts.device_id);
+    config.mount.clone_from(&cli_opts.mount);
+    config.reconnect_interval.clone_from(&cli_opts.reconnect_interval);
+    config.heartbeat_interval.clone_from(&cli_opts.heartbeat_interval);
     Ok(config)
 }
 
