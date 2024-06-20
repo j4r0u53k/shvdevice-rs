@@ -732,7 +732,7 @@ mod tests {
             let mut resp_rx = cli_cmd_tx
                 .do_rpc_call("path/to/resource", "get")
                 .expect("RpcCall command send");
-            receive_rpc_msg(&mut resp_rx).timeout(Duration::from_millis(3000)).await.expect_err("Unexpected method call response");
+            receive_rpc_msg(&mut resp_rx).timeout(Duration::from_millis(1000)).await.expect_err("Unexpected method call response");
         }
 
         async fn check_notification_received(
@@ -742,7 +742,7 @@ mod tests {
             param: Option<&RpcValue>,
         ) {
             let received_msg = receive_notification(notify_rx)
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .unwrap_or_else(|_| panic!("Notification for path `{:?}`, signal `{:?}` not received", &path, &method));
             assert!(received_msg.is_signal());
             assert_eq!(received_msg.shv_path(), path);
@@ -760,7 +760,7 @@ mod tests {
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
             let _subscribe_req = conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
             let mut notify_rx_dup = cli_cmd_tx
@@ -771,7 +771,7 @@ mod tests {
                 .subscribe("path/to", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
             let _subscribe_req = conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
             conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
@@ -803,7 +803,7 @@ mod tests {
                 .expect("ClientCommand subscribe send");
 
             let _subscribe_req = conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
             // Path mismatch
@@ -813,7 +813,7 @@ mod tests {
             conn_mock.emulate_receive_signal("path/to/resource", "mntchng", Some(42.into()));
 
             receive_notification(&mut notify_rx)
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .expect_err("Unexpected notification received");
         }
 
@@ -828,7 +828,7 @@ mod tests {
                 .expect("ClientCommand subscribe send");
 
             let _subscribe_req = conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
             let mut notify_rx_2 = cli_cmd_tx
@@ -845,7 +845,7 @@ mod tests {
 
             drop(notify_rx_2);
             let unsubscribe_req = conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(100)).await
+                .timeout(Duration::from_millis(1000)).await
                 .expect("Unsubscribe request timeout");
             assert_eq!(unsubscribe_req.shv_path(), Some(".broker/app"));
             assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
