@@ -626,18 +626,20 @@ mod tests {
             };
         }
 
-        async fn init_connection(conn_evt_tx: &Sender<ConnectionEvent>,
-                                 cli_evt_rx: &mut ClientEventsReceiver) -> ConnectionMock
-        {
+        async fn init_connection(
+            conn_evt_tx: &Sender<ConnectionEvent>,
+            cli_evt_rx: &mut ClientEventsReceiver,
+        ) -> ConnectionMock {
             let conn_mock = ConnectionMock::new(conn_evt_tx);
             expect_client_connected(cli_evt_rx).await;
             conn_mock
         }
 
-        pub async fn receive_connected_and_disconnected_events(conn_evt_tx: Sender<ConnectionEvent>,
-                                                               _cli_cmd_tx: ClientCommandSender,
-                                                               mut client_events_rx: ClientEventsReceiver)
-        {
+        pub async fn receive_connected_and_disconnected_events(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            _cli_cmd_tx: ClientCommandSender,
+            mut client_events_rx: ClientEventsReceiver,
+        ) {
             {
                 let _conn_mock = ConnectionMock::new(&conn_evt_tx);
                 expect_client_connected(&mut client_events_rx).await;
@@ -648,10 +650,11 @@ mod tests {
             expect_client_connected(&mut client_events_rx).await;
         }
 
-        pub async fn send_message(conn_evt_tx: Sender<ConnectionEvent>,
-                                  cli_cmd_tx: ClientCommandSender,
-                                  mut cli_evt_rx: ClientEventsReceiver)
-        {
+        pub async fn send_message(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
 
             cli_cmd_tx.send_message(RpcMessage::new_request(
@@ -668,10 +671,11 @@ mod tests {
             assert_eq!(msg.param(), Some(&42.into()));
         }
 
-        pub async fn send_message_fails(conn_evt_tx: Sender<ConnectionEvent>,
-                                        cli_cmd_tx: ClientCommandSender,
-                                        mut cli_evt_rx: ClientEventsReceiver)
-        {
+        pub async fn send_message_fails(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
 
             cli_cmd_tx.send_message(RpcMessage::new_request(
@@ -696,10 +700,11 @@ mod tests {
             rx.next().await.unwrap().to_rpcmesage().unwrap()
         }
 
-        pub async fn call_method_and_receive_response(conn_evt_tx: Sender<ConnectionEvent>,
-                                                  cli_cmd_tx: ClientCommandSender,
-                                                  mut cli_evt_rx: ClientEventsReceiver)
-        {
+        pub async fn call_method_and_receive_response(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let mut resp_rx = cli_cmd_tx
                 .do_rpc_call("path/to/resource", "get")
@@ -713,17 +718,23 @@ mod tests {
             assert_eq!(resp.result().unwrap(), &RpcValue::from(42));
         }
 
-        pub async fn call_method_timeouts_when_disconnected(_conn_evt_tx: Sender<ConnectionEvent>,
-                                                            cli_cmd_tx: ClientCommandSender,
-                                                            mut _cli_evt_rx: ClientEventsReceiver)
-        {
+        pub async fn call_method_timeouts_when_disconnected(
+            _conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut _cli_evt_rx: ClientEventsReceiver,
+        ) {
             let mut resp_rx = cli_cmd_tx
                 .do_rpc_call("path/to/resource", "get")
                 .expect("RpcCall command send");
             receive_rpc_msg(&mut resp_rx).timeout(Duration::from_millis(3000)).await.expect_err("Unexpected method call response");
         }
 
-        async fn check_notification_received(notify_rx: &mut NotificationsReceiver, path: Option<&str>, method: Option<&str>, param: Option<&RpcValue>) {
+        async fn check_notification_received(
+            notify_rx: &mut NotificationsReceiver,
+            path: Option<&str>,
+            method: Option<&str>,
+            param: Option<&RpcValue>,
+        ) {
             let received_msg = receive_notification(notify_rx)
                 .timeout(Duration::from_millis(100)).await
                 .unwrap_or_else(|_| panic!("Notification for path `{:?}`, signal `{:?}` not received", &path, &method));
@@ -733,16 +744,29 @@ mod tests {
             assert_eq!(received_msg.param(), param);
         }
 
-        pub async fn receive_subscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
-                                                     cli_cmd_tx: ClientCommandSender,
-                                                     mut cli_evt_rx: ClientEventsReceiver)
-        {
+        pub async fn receive_subscribed_notification(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let mut notify_rx = cli_cmd_tx
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
+            let _subscribe_req = conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(100)).await
+                .expect("Subscribe request timeout");
 
-            let _subscribe_req = conn_mock.expect_send_message().await;
+            let mut notify_rx_dup = cli_cmd_tx
+                .subscribe("path/to/resource", SIG_CHNG)
+                .expect("ClientCommand subscribe send");
+
+            let mut notify_rx_prefix = cli_cmd_tx
+                .subscribe("path/to", SIG_CHNG)
+                .expect("ClientCommand subscribe send");
+            let _subscribe_req = conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(100)).await
+                .expect("Subscribe request timeout");
 
             conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
             conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(43.into()));
@@ -752,24 +776,73 @@ mod tests {
             check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
             check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
             check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
         }
 
-        pub async fn do_not_receive_unsubscribed_notification(conn_evt_tx: Sender<ConnectionEvent>,
-                                                              cli_cmd_tx: ClientCommandSender,
-                                                              mut cli_evt_rx: ClientEventsReceiver)
-        {
+        pub async fn do_not_receive_unsubscribed_notification(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
             let mut notify_rx = cli_cmd_tx
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
-            let _subscribe_req = conn_mock.expect_send_message().await;
+            let _subscribe_req = conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(100)).await
+                .expect("Subscribe request timeout");
 
+            // Path mismatch
             conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
+            conn_mock.emulate_receive_signal("path/to/res", SIG_CHNG, Some(42.into()));
+            // Signal mismatch
+            conn_mock.emulate_receive_signal("path/to/resource", "mntchng", Some(42.into()));
 
             receive_notification(&mut notify_rx)
                 .timeout(Duration::from_millis(100)).await
                 .expect_err("Unexpected notification received");
+        }
+
+        pub async fn subscribe_and_unsubscribe(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut notify_rx_1 = cli_cmd_tx
+                .subscribe("path/to/resource", SIG_CHNG)
+                .expect("ClientCommand subscribe send");
+
+            let _subscribe_req = conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(100)).await
+                .expect("Subscribe request timeout");
+
+            let mut notify_rx_2 = cli_cmd_tx
+                .subscribe("path/to/resource", SIG_CHNG)
+                .expect("ClientCommand subscribe send");
+
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
+            check_notification_received(&mut notify_rx_1, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx_2, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+
+            drop(notify_rx_1);
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("bar".into()));
+            check_notification_received(&mut notify_rx_2, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+
+            drop(notify_rx_2);
+            let unsubscribe_req = conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(100)).await
+                .expect("Unsubscribe request timeout");
+            assert_eq!(unsubscribe_req.shv_path(), Some(".broker/app"));
+            assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
         }
 
         // Request handling tests
@@ -944,7 +1017,6 @@ mod tests {
     #[cfg(feature = "tokio")]
     pub mod tokio {
         use super::*;
-        // use crate::app_node;
         use crate::appnodes::DotAppNode;
         use super::drivers::make_client_with_handlers;
 
@@ -955,6 +1027,7 @@ mod tests {
         def_test!(call_method_and_receive_response);
         def_test!(receive_subscribed_notification);
         def_test!(do_not_receive_unsubscribed_notification);
+        def_test!(subscribe_and_unsubscribe);
 
         def_test!(handle_method_calls, make_client_with_handlers());
 
@@ -987,7 +1060,6 @@ mod tests {
 
     #[cfg(feature = "async_std")]
     pub mod async_std {
-        // use crate::app_node;
         use crate::appnodes::DotAppNode;
         use super::*;
         use super::drivers::make_client_with_handlers;
@@ -999,6 +1071,7 @@ mod tests {
         def_test!(call_method_and_receive_response);
         def_test!(receive_subscribed_notification);
         def_test!(do_not_receive_unsubscribed_notification);
+        def_test!(subscribe_and_unsubscribe);
 
         def_test!(handle_method_calls, make_client_with_handlers());
 
