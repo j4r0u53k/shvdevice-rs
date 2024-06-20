@@ -744,8 +744,8 @@ mod tests {
             param: Option<&RpcValue>,
         ) {
             let received_msg = receive_notification(notify_rx)
-                .timeout(Duration::from_millis(1000)).await
-                .unwrap_or_else(|_| panic!("Notification for path `{:?}`, signal `{:?}` not received", &path, &method));
+                .timeout(Duration::from_millis(3000)).await
+                .unwrap_or_else(|_| panic!("Notification for path `{:?}`, signal `{:?}`, param `{:?}` not received", &path, &method, &param));
             assert!(received_msg.is_signal());
             assert_eq!(received_msg.shv_path(), path);
             assert_eq!(received_msg.method(), method);
@@ -761,7 +761,7 @@ mod tests {
             let mut notify_rx = cli_cmd_tx
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
-            let _subscribe_req = conn_mock.expect_send_message()
+            conn_mock.expect_send_message()
                 .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
@@ -772,7 +772,7 @@ mod tests {
             let mut notify_rx_prefix = cli_cmd_tx
                 .subscribe("path/to", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
-            let _subscribe_req = conn_mock.expect_send_message()
+            conn_mock.expect_send_message()
                 .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
@@ -804,7 +804,7 @@ mod tests {
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
-            let _subscribe_req = conn_mock.expect_send_message()
+            conn_mock.expect_send_message()
                 .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
@@ -829,13 +829,20 @@ mod tests {
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
 
-            let _subscribe_req = conn_mock.expect_send_message()
+            conn_mock.expect_send_message()
                 .timeout(Duration::from_millis(1000)).await
                 .expect("Subscribe request timeout");
 
             let mut notify_rx_2 = cli_cmd_tx
                 .subscribe("path/to/resource", SIG_CHNG)
                 .expect("ClientCommand subscribe send");
+
+            // Sync with the client task to ensure that the subscription
+            // has been registered before emulating signals receive.
+            cli_cmd_tx.send_message(RpcMessage::default()).expect("Send sync message");
+            conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(1000)).await
+                .expect("Sync msg timeout");
 
             conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
             check_notification_received(&mut notify_rx_1, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
