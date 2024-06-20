@@ -130,6 +130,8 @@ pub enum ClientCommand {
 
 const BROKER_APP_NODE: &str = ".broker/app";
 
+// The wrapping struct itself is descriptive
+#[allow(clippy::type_complexity)]
 pub struct MethodsGetter<T>(pub(crate) Box<dyn Fn(String, Option<AppState<T>>) -> BoxFuture<'static, Option<Vec<&'static MetaMethod>>> + Sync + Send>);
 
 impl<T> MethodsGetter<T> {
@@ -142,6 +144,8 @@ impl<T> MethodsGetter<T> {
     }
 }
 
+// The wrapping struct itself is descriptive
+#[allow(clippy::type_complexity)]
 pub struct RequestHandler<T>(pub(crate) Box<dyn Fn(RpcMessage, ClientCommandSender, Option<AppState<T>>) -> BoxFuture<'static, ()> + Sync + Send>);
 
 impl<T> RequestHandler<T> {
