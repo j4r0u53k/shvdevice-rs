@@ -42,7 +42,7 @@ pub struct NotificationsReceiver {
 }
 
 impl NotificationsReceiver {
-    pub fn next(&mut self) -> futures::prelude::stream::Next<'_, Receiver<RpcFrame>> {
+    pub fn recv(&mut self) -> futures::prelude::stream::Next<'_, Receiver<RpcFrame>> {
         self.notifications_rx.next()
     }
 }
@@ -229,8 +229,13 @@ impl Subscriptions {
         self.0.clear();
     }
 
-    fn add(&mut self, path: impl Into<String>, signal: impl Into<String>, subscription_id: u64, notifications_sender: Sender<RpcFrame>) -> bool
-    {
+    fn add(
+        &mut self,
+        path: impl Into<String>,
+        signal: impl Into<String>,
+        subscription_id: u64,
+        notifications_sender: Sender<RpcFrame>,
+    ) -> bool {
         let path = path.into();
         let signal = signal.into();
 
@@ -238,14 +243,14 @@ impl Subscriptions {
             .entry(path.clone()).or_default()
             .entry(signal.clone()).or_default();
 
-        let new_subscription = path_signal_subscriptions.is_empty();
+        let added_new = path_signal_subscriptions.is_empty();
 
-        if let Some(_) = path_signal_subscriptions.insert(subscription_id, notifications_sender) {
+        if path_signal_subscriptions.insert(subscription_id, notifications_sender).is_some() {
             panic!("BUG: Subscription with the same ID {} for path: {}, method: {}. Dump: {:?}",
                 subscription_id, path, signal, &self);
         }
 
-        new_subscription
+        added_new
     }
 
     fn remove(&mut self, path: impl Into<String>, signal: impl Into<String>, subscription_id: u64) -> bool {
@@ -438,7 +443,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                             },
                             Disconnected => {
                                 conn_cmd_sender = None;
-                                // NOTE: When a client is disconnected, the broker also knows that
+                                // NOTE: When the client is disconnected, the broker also knows that
                                 // (because of heartbeats) and it should remove all the subscriptions
                                 // registered by the client, so the client can also safely clear
                                 // the subscriptions here.
@@ -510,10 +515,7 @@ impl<T: Send + Sync + 'static> Client<T> {
             if let Some(req_id) = frame.request_id() {
                 if let Some(response_sender) = pending_rpc_calls.remove(&req_id) {
                     if response_sender.unbounded_send(frame.clone()).is_err() {
-                        warn!(
-                            "Response channel closed before received response: {}",
-                            &frame
-                        )
+                        warn!("Response channel closed before received response: {}", &frame);
                     }
                 }
             }
@@ -524,7 +526,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                         if let Some(subscribers) = subscribed_signals.get(signal) {
                             for (subscription_id, notifications_sender) in subscribers {
                                 if notifications_sender.unbounded_send(frame.clone()).is_err() {
-                                    warn!("Notification channel for path `{}`, signal `{}`, id: {} closed while the subscription is still active (possible BUG)",
+                                    warn!("Notification channel for path `{}`, signal `{}`, id: {} closed while the subscription is still active",
                                         &subscribed_path,
                                         &signal,
                                         subscription_id);
@@ -703,7 +705,7 @@ mod tests {
         }
 
         async fn receive_notification(rx: &mut NotificationsReceiver) -> RpcMessage {
-            rx.next().await.unwrap().to_rpcmesage().unwrap()
+            rx.recv().await.unwrap().to_rpcmesage().unwrap()
         }
 
         pub async fn call_method_and_receive_response(
