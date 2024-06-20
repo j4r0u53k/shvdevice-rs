@@ -553,8 +553,8 @@ fn create_subscription_request(path: &str, signal: &str, request: SubscriptionRe
         },
         Some({
             let mut map = shvrpc::shvproto::Map::new();
-            map.insert("methods".to_string(), signal.into());
-            map.insert("path".to_string(),path.into());
+            map.insert("signal".to_string(), signal.into());
+            map.insert("paths".to_string(),path.into());
             map.into()
         })
     )
@@ -852,8 +852,8 @@ mod tests {
             let shvrpc::shvproto::Value::Map(params) = unsubscribe_req.param().expect("Unsubscribe request has param").value() else {
                 panic!("Unsubscribe params is not a map");
             };
-            assert_eq!(params.get("methods").map(shvrpc::shvproto::RpcValue::as_str), Some(SIG_CHNG));
-            assert_eq!(params.get("path").map(shvrpc::shvproto::RpcValue::as_str), Some("path/to/resource"));
+            assert_eq!(params.get("signal").map(shvrpc::shvproto::RpcValue::as_str), Some(SIG_CHNG));
+            assert_eq!(params.get("paths").map(shvrpc::shvproto::RpcValue::as_str), Some("path/to/resource"));
         }
 
         // Request handling tests
