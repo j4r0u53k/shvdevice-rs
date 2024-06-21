@@ -860,7 +860,7 @@ mod tests {
             let unsubscribe_req = conn_mock.expect_send_message()
                 .timeout(Duration::from_millis(1000)).await
                 .expect("Unsubscribe request timeout");
-            assert_eq!(unsubscribe_req.shv_path(), Some(".broker/app"));
+            assert_eq!(unsubscribe_req.shv_path(), Some(BROKER_APP_NODE));
             assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
             let shvrpc::shvproto::Value::Map(params) = unsubscribe_req.param().expect("Unsubscribe request has param").value() else {
                 panic!("Unsubscribe params is not a map");

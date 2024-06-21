@@ -3,7 +3,7 @@
 
 use crate::client::{RequestHandler, ClientCommandSender, MethodsGetter, AppState};
 use crate::runtime::spawn_task;
-use log::{error, warn};
+use log::{error, debug};
 use shvrpc::rpcframe::RpcFrame;
 use shvrpc::{metamethod, shvproto::rpcvalue, RpcMessage, RpcMessageMetaTags};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -414,9 +414,14 @@ fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_
     let shv_path = request.shv_path().unwrap_or_default();
     let check_request_access = || {
         let method = request.method().unwrap_or_default();
+        let full_path = if shv_path.is_empty() {
+            mount_path
+        } else {
+            &format!("{mount_path}/{shv_path}")
+        };
         let Some(mm) = methods.iter().find(|mm| mm.name == method) else {
             return Err(RpcError::new(RpcErrorCode::MethodNotFound,
-                                     format!("Unknown method on path '{mount_path}/{shv_path}:{method}()'")));
+                                     format!("Unknown method on path '{full_path}:{method}()'")));
         };
         let Some(rq_level) = request.access_level() else {
             return Err(RpcError::new(RpcErrorCode::InvalidRequest, "Undefined access level"));
@@ -427,10 +432,12 @@ fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_
             Err(RpcError::new(
                     RpcErrorCode::PermissionDenied,
                     format!("Insufficient permissions. \
-                            Method '{mount_path}/{shv_path}:{method}()' \
-                            called with access level '{:?}', required '{:?}'",
+                            Method '{full_path}:{method}()' \
+                            called with access level {:?}, required {} ({:?})",
                             rq_level,
-                            mm.access)
+                            mm.access as i32,
+                            mm.access,
+                            )
                     )
                )
         }
@@ -441,9 +448,9 @@ fn resolve_request_access(request: &RpcMessage, mount_path: &String, client_cmd_
     };
     let mut resp = request.prepare_response()
         .expect("should be able to prepare response");
-    warn!("Check request access on path: {}/{}, error: {}",
+    debug!("Check request access on path `{}` / `{}`, error: {}",
           mount_path,
-          request.shv_path().unwrap_or_default(),
+          shv_path,
           err);
     resp.set_error(err);
     let _ = client_cmd_tx.send_message(resp);
