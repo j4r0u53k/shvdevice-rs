@@ -1075,6 +1075,8 @@ mod tests {
 
         #[generics(TestDriverBounds)]
         pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
+            let _ = simple_logger::init_with_level(Level::Debug);
+
             ::tokio::runtime::Builder::new_multi_thread()
                 .build()
                 .unwrap()
@@ -1119,6 +1121,8 @@ mod tests {
 
         #[generics(TestDriverBounds)]
         pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
+            let _ = simple_logger::init_with_level(Level::Debug);
+
             ::async_std::task::block_on(init_client(test_drv, custom_client));
         }
     }

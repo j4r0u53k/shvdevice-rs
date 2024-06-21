@@ -19,25 +19,23 @@ required-features = ["async_std"]
 
 [dev-dependencies]
 clap = { version = "4.4", features = ["derive"] }
+simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
 
 [dependencies]
 shvrpc = { git = "https://github.com/j4r0u53k/libshvrpc-rs", rev = "522fef0e4184a336df1ae7a8b67c5c872a158269" }
-
-# FIXME: consider reexporting in shvrpc to use the same version
 futures = "0.3.29"
-async-std = { version = "1.12.0", features = ["attributes"], optional = true }
-url = "2.4.1"
-log = "0.4.20"
-simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
-duration-str = "0.11.2"
-async-broadcast = "0.7.1"
-tokio = { version = "1.36.0", features = ["full"], optional = true }
-tokio-util = { version = "0.7.10", features = ["compat"], optional = true }
 futures-time = "3.0.0"
 futures-net = "0.6.0"
+url = "2.4.1"
+log = "0.4.20"
+duration-str = "0.11.2"
+async-broadcast = "0.7.1"
+async-std = { version = "1.12.0", features = ["attributes"], optional = true }
+tokio = { version = "1.36.0", features = ["full"], optional = true }
+tokio-util = { version = "0.7.10", features = ["compat"], optional = true }
 generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", branch = "main" }
 
-# NOTE: macro_magic needs to be as a direct dependency because some functions from
+# NOTE: macro_magic needs to be here as a direct dependency because some functions from
 # there are called in expansion of `generics_inner` macro from generics-alias crate.
 macro_magic = "0.5.0"
 
