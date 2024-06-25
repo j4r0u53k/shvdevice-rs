@@ -10,7 +10,7 @@ use shvrpc::metamethod::MetaMethod;
 use shvrpc::rpcframe::RpcFrame;
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
-use shvrpc::shvproto::RpcValue;
+use shvproto::RpcValue;
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -558,7 +558,7 @@ fn create_subscription_request(path: &str, signal: &str, request: SubscriptionRe
             SubscriptionRequest::Unsubscribe => METH_UNSUBSCRIBE,
         },
         Some({
-            let mut map = shvrpc::shvproto::Map::new();
+            let mut map = shvproto::Map::new();
             map.insert("signal".to_string(), signal.into());
             map.insert("paths".to_string(),path.into());
             map.into()
@@ -862,11 +862,11 @@ mod tests {
                 .expect("Unsubscribe request timeout");
             assert_eq!(unsubscribe_req.shv_path(), Some(BROKER_APP_NODE));
             assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
-            let shvrpc::shvproto::Value::Map(params) = unsubscribe_req.param().expect("Unsubscribe request has param").value() else {
+            let shvproto::Value::Map(params) = unsubscribe_req.param().expect("Unsubscribe request has param").value() else {
                 panic!("Unsubscribe params is not a map");
             };
-            assert_eq!(params.get("signal").map(shvrpc::shvproto::RpcValue::as_str), Some(SIG_CHNG));
-            assert_eq!(params.get("paths").map(shvrpc::shvproto::RpcValue::as_str), Some("path/to/resource"));
+            assert_eq!(params.get("signal").map(shvproto::RpcValue::as_str), Some(SIG_CHNG));
+            assert_eq!(params.get("paths").map(shvproto::RpcValue::as_str), Some("path/to/resource"));
         }
 
         // Request handling tests

@@ -1,7 +1,8 @@
 
 use crate::clientnode::{ConstantNode, METH_PING};
 use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
-use shvrpc::{RpcMessageMetaTags, RpcMessage, shvproto::RpcValue, rpcmessage::RpcError};
+use shvrpc::{RpcMessageMetaTags, RpcMessage, rpcmessage::RpcError};
+use shvproto::RpcValue;
 
 const METH_SHV_VERSION_MAJOR: &str = "shvVersionMajor";
 const METH_SHV_VERSION_MINOR: &str = "shvVersionMinor";
