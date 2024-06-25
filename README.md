@@ -1,3 +1,5 @@
+![deps](https://deps.rs/repo/github/j4r0u53k/shvclient-rs/status.svg)
+
 # SHV Client library for Rust
 
 This is a library implementing client functionality with device capabilities
