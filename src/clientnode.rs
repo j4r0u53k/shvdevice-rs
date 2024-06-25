@@ -544,13 +544,6 @@ macro_rules! count {
 }
 
 #[macro_export]
-macro_rules! no_response {
-    () => {
-        None::<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>>
-    };
-}
-
-#[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident $(<$T:ty>)? ($request:ident, $client_cmd_tx:ident $(, $app_state:ident)?) {
         $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ident))? => $body:block)+
@@ -573,7 +566,7 @@ macro_rules! fixed_node {
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
                     let __client_cmd_tx_clone = $client_cmd_tx.clone();
-                    let resp_value = match $request.method() {
+                    let resp_value: Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> = match $request.method() {
 
                         $(Some($method) => {
                             $crate::method_handler!($(($param : $type))? @$request@ $body)

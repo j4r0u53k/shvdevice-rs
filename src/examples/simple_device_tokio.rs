@@ -7,10 +7,11 @@ use log::*;
 use shvrpc::metamethod::MetaMethod;
 use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
-use shvclient::{no_response, MethodsGetter, RequestHandler};
+use shvclient::{MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppState};
 use simple_logger::SimpleLogger;
+use shvproto::RpcValue;
 
 #[derive(Parser, Debug)]
 //#[structopt(name = "device", version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = "SHV call")]
@@ -138,17 +139,17 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
         device_handler(request, client_cmd_tx) {
             "something" [IsGetter, Browse] (param: Int) => {
                 println!("param: {}", param);
-                Some(Ok(shvrpc::RpcValue::from("name result")))
+                Some(Ok(RpcValue::from("name result")))
             }
             "42" [IsGetter, Browse] => {
-                Some(Ok(shvrpc::RpcValue::from(42)))
+                Some(Ok(RpcValue::from(42)))
             }
         }
     };
 
     let delay_node = shvclient::fixed_node!(
         delay_handler<State>(request, client_cmd_tx, app_state) {
-            "getDelayed" [IsGetter, Browse] => {
+            "getDelayed" [None, Browse] => {
                 let mut resp = request.prepare_response().unwrap_or_default();
                 tokio::task::spawn(async move {
                     let mut app_state = app_state;
@@ -171,7 +172,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
                 // The response is sent in the task above, so we need
                 // to tell the library to not send any response.
-                no_response!()
+                None
 
                 // Otherwise, return either RpcValue or RpcError
                 // Some(Ok(shvrpc::RpcValue::from(true)))
