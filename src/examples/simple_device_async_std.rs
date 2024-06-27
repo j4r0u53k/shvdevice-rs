@@ -54,18 +54,16 @@ fn init_logger(cli_opts: &Opts) {
     logger.init().unwrap();
 }
 
-fn load_client_config(cli_opts: &Opts) -> shvrpc::Result<ClientConfig> {
+fn load_client_config(cli_opts: Opts) -> shvrpc::Result<ClientConfig> {
     let mut config = if let Some(config_file) = &cli_opts.config {
         ClientConfig::from_file_or_default(config_file, cli_opts.create_default_config)?
     } else {
         Default::default()
     };
-    if let Some(url) = &cli_opts.url {
-        config.url.clone_from(url);
-    }
-    config.device_id.clone_from(&cli_opts.device_id);
-    config.mount.clone_from(&cli_opts.mount);
-    config.reconnect_interval.clone_from(&cli_opts.reconnect_interval);
+    config.url = cli_opts.url.unwrap_or(config.url);
+    config.device_id = cli_opts.device_id.or(config.device_id);
+    config.mount = cli_opts.mount.or(config.mount);
+    config.reconnect_interval = cli_opts.reconnect_interval.or(config.reconnect_interval);
     config.heartbeat_interval.clone_from(&cli_opts.heartbeat_interval);
     Ok(config)
 }
@@ -161,7 +159,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
     log::info!("{} starting", std::module_path!());
     log::info!("=====================================================");
 
-    let client_config = load_client_config(&cli_opts).expect("Invalid config");
+    let client_config = load_client_config(cli_opts).expect("Invalid config");
 
     let counter = AppState::new(RwLock::new(-10));
     let cnt = counter.clone();
