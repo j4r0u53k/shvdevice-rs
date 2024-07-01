@@ -538,18 +538,15 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
 // Generator for fixed nodes
 
 #[macro_export]
-macro_rules! count {
-    () => (0usize);
-    ( $x:tt $($xs:tt)* ) => (1usize + $crate::count!($($xs)*));
-}
-
-#[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident $(<$T:ty>)? ($request:ident, $client_cmd_tx:ident $(, $app_state:ident)?) {
         $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ident))? => $body:block)+
-    }) => {
-
+    }
+    $(signals { $($signame:tt [$sigparam:literal]),+ })?) => {
         {
+
+            $crate::signals!($($($signame [$sigparam]),+)?);
+
             const METHODS: [$crate::clientnode::MetaMethod; $crate::count!($($method)+)] = [
                 $(MetaMethod {
                     name: $method,
@@ -593,7 +590,7 @@ macro_rules! fixed_node {
             }
 
             $crate::clientnode::ClientNode::fixed(
-                &METHODS,
+                METHODS.iter().chain(SIGNALS.iter()),
                 [Route::new(
                     [$($method),+],
                     $crate::request_handler!($fn_name $(,$app_state)?),
@@ -634,6 +631,32 @@ macro_rules! method_handler {
     };
     (@$request:ident@ $body:block) => {
         $body
+    };
+}
+
+#[macro_export]
+macro_rules! count {
+    () => (0usize);
+    ( $x:tt $($xs:tt)* ) => (1usize + $crate::count!($($xs)*));
+}
+
+#[macro_export]
+macro_rules! signals {
+    () => {
+        const SIGNALS: [MetaMethod; 0] = [];
+    };
+
+    ($($signame:tt [$sigparam:literal]),+) => {
+        const SIGNALS: [MetaMethod; $crate::count!($($signame)+)] = [
+            $(MetaMethod {
+                name: $signame,
+                flags: $crate::clientnode::Flag::IsSignal as u32,
+                access: $crate::clientnode::AccessLevel::Read,
+                param: $sigparam,
+                result: "",
+                description: "",
+            },)+
+        ];
     };
 }
 
@@ -740,5 +763,62 @@ mod tests {
     fn reject_duplicate_method() {
         let duplicate_methods = PROPERTY_METHODS.iter().chain(DIR_LS_METHODS.iter());
         ClientNode::fixed(duplicate_methods, vec![Route::new([METH_GET, METH_SET, METH_LS], RequestHandler::stateful(dummy_handler))]);
+    }
+
+    #[test]
+    fn macro_can_create_node() {
+        let _: ClientNode<()> = crate::fixed_node!{
+            fixed_node_test(request, client_cmd_tx) {
+                METH_GET [IsGetter, Browse] => {
+                    Some(Ok(METH_GET.into()))
+                }
+                METH_SET [IsSetter, Write] => {
+                    Some(Ok(METH_SET.into()))
+                }
+            }
+        };
+    }
+
+    #[test]
+    fn macro_can_create_node_signals() {
+        let _: ClientNode<()> = crate::fixed_node!{
+            fixed_node_test(request, client_cmd_tx) {
+                METH_GET [IsGetter, Browse] => {
+                    Some(Ok(METH_GET.into()))
+                }
+                METH_SET [IsSetter, Write] => {
+                    Some(Ok(METH_SET.into()))
+                }
+            }
+            signals {
+                SIG_CHNG ["Int"],
+                "mntchng" ["Void"]
+            }
+        };
+    }
+
+    // Tests that both "dup" method and "dup" signal are created
+    // by the macro and passed to the node constructor.
+    #[test]
+    #[should_panic]
+    fn macro_reject_duplicate_method_signal() {
+        let _: ClientNode<()> = crate::fixed_node!{
+            fixed_node_test(request, client_cmd_tx)
+            {
+                METH_GET [IsGetter, Browse] => {
+                    Some(Ok(METH_GET.into()))
+                }
+                METH_SET [IsSetter, Write] => {
+                    Some(Ok(METH_SET.into()))
+                }
+                "dup" [IsGetter, Read] => {
+                    Some(Ok(().into()))
+                }
+            }
+            signals {
+                SIG_CHNG ["Int"],
+                "dup" ["Void"]
+            }
+        };
     }
 }

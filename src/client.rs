@@ -908,10 +908,27 @@ mod tests {
             client.mount_dynamic("dynamic/async",
                                  MethodsGetter::new(methods_getter),
                                  RequestHandler::stateless(request_handler));
-            client.mount_fixed("static",
-                                PROPERTY_METHODS.iter(),
-                                [Route::new([crate::clientnode::METH_GET, crate::clientnode::METH_SET],
-                                            RequestHandler::stateless(request_handler))]);
+            client.mount_fixed("fixed1",
+                PROPERTY_METHODS.iter(),
+                [Route::new([crate::clientnode::METH_GET, crate::clientnode::METH_SET],
+                    RequestHandler::stateless(request_handler))]);
+            client.mount("fixed2", {
+                use crate::clientnode::{METH_GET, METH_SET};
+                crate::fixed_node!{
+                    fixed_node_test(request, client_cmd_tx)
+                    {
+                        METH_GET [IsGetter, Browse] => {
+                            Some(Ok(METH_GET.into()))
+                        }
+                        METH_SET [IsSetter, Write] => {
+                            Some(Ok(METH_SET.into()))
+                        }
+                    }
+                    signals {
+                        SIG_CHNG ["Int"]
+                    }
+                }
+            });
             client
         }
 
@@ -938,12 +955,12 @@ mod tests {
                     .result().expect_err("Response should be Err");
                 assert_eq!(response.code, RpcErrorCode::MethodNotFound);
 
-                let request = RpcMessage::new_request("static/none", "dir", None);
+                let request = RpcMessage::new_request("fixed1/none", "dir", None);
                 let response = recv_request_get_response(&mut conn_mock, request).await
                     .result().expect_err("Response should be Err");
                 assert_eq!(response.code, RpcErrorCode::MethodNotFound);
 
-                let request = RpcMessage::new_request("static", "foo", None);
+                let request = RpcMessage::new_request("fixed1", "foo", None);
                 let response = recv_request_get_response(&mut conn_mock, request).await
                     .result().expect_err("Response should be Err");
                 assert_eq!(response.code, RpcErrorCode::MethodNotFound);
@@ -959,7 +976,12 @@ mod tests {
 
             {
                 // Requests to a valid method with sufficient permissions
-                let mut request = RpcMessage::new_request("static", "get", None);
+                let mut request = RpcMessage::new_request("fixed1", "get", None);
+                request.set_access_level(AccessLevel::Read);
+                let response = recv_request_get_response(&mut conn_mock, request).await;
+                assert_eq!(response.result().expect("Response should be Ok").as_str(), "get");
+
+                let mut request = RpcMessage::new_request("fixed2", "get", None);
                 request.set_access_level(AccessLevel::Read);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect("Response should be Ok").as_str(), "get");
@@ -982,8 +1004,13 @@ mod tests {
 
             {
                 // Insufficient permissions
-                let mut request = RpcMessage::new_request("static", "set", None);
+                let mut request = RpcMessage::new_request("fixed1", "set", None);
                 request.set_access_level(AccessLevel::Browse);
+                let response = recv_request_get_response(&mut conn_mock, request).await;
+                assert_eq!(response.result().expect_err("Response should be Err").code, RpcErrorCode::PermissionDenied);
+
+                let mut request = RpcMessage::new_request("fixed2", "set", None);
+                request.set_access_level(AccessLevel::Read);
                 let response = recv_request_get_response(&mut conn_mock, request).await;
                 assert_eq!(response.result().expect_err("Response should be Err").code, RpcErrorCode::PermissionDenied);
 
