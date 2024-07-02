@@ -150,10 +150,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
             "getDelayed" [None, Browse] => {
                 let mut resp = request.prepare_response().unwrap_or_default();
                 tokio::task::spawn(async move {
-                    let mut app_state = app_state;
                     let mut counter = app_state
-                        .as_mut()
-                        .expect("Missing state for delay node")
                         .write()
                         .await;
                     let ret_val = {

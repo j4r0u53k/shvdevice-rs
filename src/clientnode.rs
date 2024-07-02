@@ -566,6 +566,7 @@ macro_rules! fixed_node {
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
                     let __client_cmd_tx_clone = $client_cmd_tx.clone();
+                    $(let $app_state = $app_state.expect("Application state should be Some");)?
                     let resp_value: Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> = match $request.method() {
 
                         $(Some($method) => {
