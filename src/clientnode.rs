@@ -570,7 +570,7 @@ macro_rules! fixed_node {
                     let resp_value: Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> = match $request.method() {
 
                         $(Some($method) => {
-                            $crate::method_handler!($(($param : $type))? @$request@ $body)
+                            $crate::method_handler!($(($param : $type))? $method @ $request @ $body)
                         })+
 
                         _ => Some(Err($crate::clientnode::RpcError::new(
@@ -616,7 +616,7 @@ macro_rules! request_handler {
 
 #[macro_export]
 macro_rules! method_handler {
-    (($param:ident : $type:ty) @$request:ident@ $body:block) => {
+    (($param:ident : $type:ty) $method:tt @ $request:ident @ $body:block) => {
         {
             let request_param = $request.param().unwrap_or_default();
 
@@ -625,8 +625,8 @@ macro_rules! method_handler {
                  Err(err) => {
                      Some(Err($crate::clientnode::RpcError::new(
                                  $crate::clientnode::RpcErrorCode::InvalidParam,
-                                 format!("Error in conversion of parameter to type `{}`: {}",
-                                     stringify!($type),
+                                 format!("Wrong parameter for `{}`: {}",
+                                     $method,
                                      err
                                  )))
                      )
@@ -634,7 +634,7 @@ macro_rules! method_handler {
             }
         }
     };
-    (@$request:ident@ $body:block) => {
+    ($method:tt @ $request:ident @ $body:block) => {
         $body
     };
 }
