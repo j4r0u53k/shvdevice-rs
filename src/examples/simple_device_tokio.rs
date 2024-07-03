@@ -109,6 +109,23 @@ async fn emit_chng_task(
     }
 }
 
+struct CustomParam {
+    data: String,
+}
+
+impl TryFrom<&RpcValue> for CustomParam {
+    type Error = String;
+    fn try_from(value: &RpcValue) -> Result<Self, Self::Error> {
+        shvproto::rpcvalue::Map::try_from(value).and_then(
+            |val| {
+                val.get("data")
+                    .ok_or_else(|| "No data key present".to_owned())
+                    .and_then(<&String>::try_from)
+                    .map(|v| CustomParam { data: v.clone() })
+            })
+    }
+}
+
 #[tokio::main]
 pub(crate) async fn main() -> shvrpc::Result<()> {
     let cli_opts = Opts::parse();
@@ -135,9 +152,17 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     let stateless_node = shvclient::fixed_node!{
         device_handler(request, client_cmd_tx) {
-            "something" [IsGetter, Browse] (param: Int) => {
+            "something" [IsGetter, Browse] (param: i32) => {
                 println!("param: {}", param);
                 Some(Ok(RpcValue::from("name result")))
+            }
+            "setString" [IsSetter, Write] (param: &str) => {
+                println!("param: {}", param);
+                Some(Ok(RpcValue::from("name result")))
+            }
+            "setCustomParam" [IsSetter, Write] (param: CustomParam) => {
+                println!("param data: {}", &param.data);
+                Some(Ok(param.data.into()))
             }
             "42" [IsGetter, Browse] => {
                 Some(Ok(RpcValue::from(42)))

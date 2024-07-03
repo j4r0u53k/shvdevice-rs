@@ -546,7 +546,7 @@ macro_rules! count {
 #[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident $(<$T:ty>)? ($request:ident, $client_cmd_tx:ident $(, $app_state:ident)?) {
-        $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ident))? => $body:block)+
+        $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ty))? => $body:block)+
     }) => {
 
         {
@@ -616,20 +616,21 @@ macro_rules! request_handler {
 
 #[macro_export]
 macro_rules! method_handler {
-    (($param:ident : $type:ident) @$request:ident@ $body:block) => {
+    (($param:ident : $type:ty) @$request:ident@ $body:block) => {
         {
             let request_param = $request.param().unwrap_or_default();
 
-            if let $crate::clientnode::Value::$type($param) = request_param.value() {
-                $body
-            } else {
-                Some(Err($crate::clientnode::RpcError::new(
-                        $crate::clientnode::RpcErrorCode::InvalidParam,
-                        format!("Expected parameter type `{}`, got `{}`",
-                            stringify!($type),
-                            request_param.type_name()
-                        )))
-                )
+             match <$type>::try_from(request_param) {
+                 Ok($param) => $body,
+                 Err(err) => {
+                     Some(Err($crate::clientnode::RpcError::new(
+                                 $crate::clientnode::RpcErrorCode::InvalidParam,
+                                 format!("Error in conversion of parameter to type `{}`: {}",
+                                     stringify!($type),
+                                     err
+                                 )))
+                     )
+                 }
             }
         }
     };
@@ -640,12 +641,23 @@ macro_rules! method_handler {
 
 // Usage example:
 //
+// The optional parameter type at methods definitions can be any type for
+// which `TryFrom<&RpcValue, Error=String>` is implemented.
+//
 //  let node = fixed_node!{
 //         device_handler<i32>(request, client_cmd_tx, app_state) {
-//             "name" [IsGetter, Browse] (param: Int) => {
+//             "name" [IsGetter, Browse] (param: i32) => {
 //                 println!("param: {}", param);
 //                 app_state.map(|v| { println!("app_state: {}", *v); });
 //                 Some(Ok(RpcValue::from("name result")))
+//             }
+//             "echo" [IsGetter, Browse] (param: &str) => {
+//                 println!("param: {}", param);
+//                 Some(Ok(param.into()))
+//             }
+//             "setTable" [IsGetter, Browse] (table: MyTable) => {
+//                 println!("set table: {:?}", table);
+//                 Some(Ok(table.num_items()))
 //             }
 //             "version" [IsGetter, Browse] => {
 //                 Some(Ok(RpcValue::from(42)))
