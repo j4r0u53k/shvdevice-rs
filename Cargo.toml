@@ -22,7 +22,7 @@ clap = { version = "4.4", features = ["derive"] }
 simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
 
 [dependencies]
-shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", version = "3.0.0" }
+shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", version = "3.0.1" }
 shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master", version = "3.0.0" }
 futures = "0.3.29"
 futures-time = "3.0.0"
@@ -39,6 +39,15 @@ generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", br
 # NOTE: macro_magic needs to be here as a direct dependency because some functions from
 # there are called in expansion of `generics_inner` macro from generics-alias crate.
 macro_magic = "0.5.0"
+
+
+# For local development
+
+# [patch."https://github.com/silicon-heaven/libshvproto-rs"]
+# shvproto = { path = "../libshvproto-rs" }
+#
+# [patch."https://github.com/silicon-heaven/libshvrpc-rs"]
+# shvrpc = { path = "../libshvrpc-rs" }
 
 [features]
 default = ["tokio"]
