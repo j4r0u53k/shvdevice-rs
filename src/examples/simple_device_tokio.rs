@@ -11,7 +11,7 @@ use shvclient::{MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppState};
 use simple_logger::SimpleLogger;
-use shvproto::RpcValue;
+use shvproto::{RpcValue, TryFromRpcValue};
 
 #[derive(Parser, Debug)]
 //#[structopt(name = "device", version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = "SHV call")]
@@ -109,21 +109,11 @@ async fn emit_chng_task(
     }
 }
 
-struct CustomParam {
-    data: String,
-}
 
-impl TryFrom<&RpcValue> for CustomParam {
-    type Error = String;
-    fn try_from(value: &RpcValue) -> Result<Self, Self::Error> {
-        shvproto::rpcvalue::Map::try_from(value).and_then(
-            |val| {
-                val.get("data")
-                    .ok_or_else(|| "No data key present".to_owned())
-                    .and_then(<&String>::try_from)
-                    .map(|v| CustomParam { data: v.clone() })
-            })
-    }
+#[derive(Default, Clone, TryFromRpcValue)]
+struct CustomParam {
+    data: Vec<String>,
+    data2: Vec<RpcValue>,
 }
 
 #[tokio::main]
@@ -160,9 +150,20 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
                 println!("param: {}", param);
                 Some(Ok(RpcValue::from("name result")))
             }
-            "setCustomParam" [IsSetter, Write] (param: CustomParam) => {
-                println!("param data: {}", &param.data);
-                Some(Ok(param.data.into()))
+            "setCustomParam" [IsSetter, Write] (param: Vec<CustomParam>) => {
+                for item in &param {
+                    for i in &item.data {
+                        println!("param data: {}", i);
+                        if i == "foo" {
+                            return Some(Ok(().into()));
+                        }
+                    }
+                }
+                Some(Ok(param.into()))
+            }
+            "setVecString" [IsSetter, Write] (param: Vec<String>) => {
+                println!("param data: {:?}", &param);
+                Some(Ok(().into()))
             }
             "42" [IsGetter, Browse] => {
                 Some(Ok(RpcValue::from(42)))
