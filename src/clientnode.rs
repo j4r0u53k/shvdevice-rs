@@ -565,28 +565,31 @@ macro_rules! fixed_node {
 
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
-                    let __client_cmd_tx_clone = $client_cmd_tx.clone();
                     $(let $app_state = $app_state.expect("Application state should be Some");)?
-                    let resp_value: Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> = match $request.method() {
 
-                        $(Some($method) => {
-                            $crate::method_handler!($(($param : $type))? $method @ $request @ $body)
-                        })+
+                    async fn handler($request: RpcMessage, #[allow(unused)] $client_cmd_tx: ClientCommandSender $(, $app_state: AppState<$T>)?)
+                    -> Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> {
+                        match $request.method() {
 
-                        _ => Some(Err($crate::clientnode::RpcError::new(
-                                $crate::clientnode::RpcErrorCode::MethodNotFound,
-                                format!("Invalid method: {:?}", $request.method())))
-                        )
-                    };
+                            $(Some($method) => {
+                                $crate::method_handler!($(($param : $type))? $method @ $request @ $body)
+                            })+
 
-                    if let Some(val) = resp_value {
+                            _ => Some(Err($crate::clientnode::RpcError::new(
+                                        $crate::clientnode::RpcErrorCode::MethodNotFound,
+                                        format!("Invalid method: {:?}", $request.method())))
+                            )
+                        }
+                    }
+
+                    if let Some(val) = handler($request, $client_cmd_tx.clone() $(, $app_state)?).await {
                         if let Ok(res) = val {
                             __resp.set_result(res);
                         } else if let Err(err) = val {
                             __resp.set_error(err);
                         }
 
-                        if let Err(e) = __client_cmd_tx_clone.send_message(__resp) {
+                        if let Err(e) = $client_cmd_tx.send_message(__resp) {
                             error!("{}: Cannot send response ({e})", stringify!($fn_name));
                         }
                     }

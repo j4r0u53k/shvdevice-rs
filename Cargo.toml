@@ -22,7 +22,7 @@ clap = { version = "4.4", features = ["derive"] }
 simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
 
 [dependencies]
-shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", version = "3.0.1" }
+shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", version = "3.0.2" }
 shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master", version = "3.0.0" }
 futures = "0.3.29"
 futures-time = "3.0.0"
