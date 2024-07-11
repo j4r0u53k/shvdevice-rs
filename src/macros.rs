@@ -41,7 +41,7 @@ macro_rules! fixed_node {
 
         {
             const METHODS: [$crate::clientnode::MetaMethod; $crate::count!($($method)+)] = [
-                $(MetaMethod {
+                $($crate::clientnode::MetaMethod {
                     name: $method,
                     flags: $($crate::clientnode::Flag::$flags as u32)|+,
                     access: $crate::clientnode::AccessLevel::$access,
@@ -51,13 +51,13 @@ macro_rules! fixed_node {
                 },)+
             ];
 
-            async fn $fn_name($request: RpcMessage, $client_cmd_tx: ClientCommandSender $(, $app_state: Option<AppState<$T>>)?) {
+            async fn $fn_name($request: ::shvrpc::rpcmessage::RpcMessage, $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: Option<$crate::AppState<$T>>)?) {
 
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
                     $(let $app_state = $app_state.expect("Application state should be Some");)?
 
-                    async fn handler($request: RpcMessage, #[allow(unused)] $client_cmd_tx: ClientCommandSender $(, $app_state: AppState<$T>)?)
+                    async fn handler($request: ::shvrpc::rpcmessage::RpcMessage, #[allow(unused)] $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: AppState<$T>)?)
                     -> Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> {
                         match $request.method() {
 
@@ -88,7 +88,7 @@ macro_rules! fixed_node {
 
             $crate::clientnode::ClientNode::fixed(
                 &METHODS,
-                [Route::new(
+                [$crate::clientnode::Route::new(
                     [$($method),+],
                     $crate::request_handler!($fn_name $(,$app_state)?),
                 )]
@@ -100,10 +100,10 @@ macro_rules! fixed_node {
 #[macro_export]
 macro_rules! request_handler {
     ($fn_name:ident) => {
-        RequestHandler::stateless($fn_name)
+        $crate::RequestHandler::stateless($fn_name)
     };
     ($fn_name:ident, $app_state:ident) => {
-        RequestHandler::stateful($fn_name)
+        $crate::RequestHandler::stateful($fn_name)
     };
 }
 
@@ -115,15 +115,12 @@ macro_rules! method_handler {
 
              match <$type>::try_from(request_param) {
                  Ok($param) => $body,
-                 Err(err) => {
-                     Some(Err($crate::clientnode::RpcError::new(
+                 Err(err) => Some(Err($crate::clientnode::RpcError::new(
                                  $crate::clientnode::RpcErrorCode::InvalidParam,
                                  format!("Wrong parameter for `{}`: {}",
                                      $method,
                                      err
-                                 )))
-                     )
-                 }
+                                 ))))
             }
         }
     };

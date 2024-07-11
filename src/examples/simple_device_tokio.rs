@@ -9,7 +9,7 @@ use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvclient::{MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
-use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppState};
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, AppState};
 use simple_logger::SimpleLogger;
 use shvproto::{RpcValue, TryFromRpcValue};
 
