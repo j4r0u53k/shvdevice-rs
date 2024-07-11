@@ -1,4 +1,4 @@
-![deps](https://deps.rs/repo/github/j4r0u53k/shvclient-rs/status.svg)
+![deps](https://deps.rs/repo/github/silicon-heaven/libshvclient-rs/status.svg)
 
 # SHV Client library for Rust
 
