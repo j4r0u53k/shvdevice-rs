@@ -1,3 +1,5 @@
+#[cfg(not(any(feature = "tokio", feature = "async_std")))]
+compile_error!("No async runtime selected. At least one of `tokio`, `async_std` features must be enabled.");
 
 pub enum Runtime {
     #[cfg(feature = "async_std")]
