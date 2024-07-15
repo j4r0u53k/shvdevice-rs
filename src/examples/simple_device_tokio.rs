@@ -146,8 +146,16 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
                 println!("param: {}", param);
                 Some(Ok(RpcValue::from("name result")))
             }
-            "setString" [IsSetter, Write] (param: &str) => {
-                println!("param: {}", param);
+            "setString" [IsSetter, Write] (param: Vec<String>) => {
+                for s in &param {
+                    if s.contains("foo") {
+                        return Some(Err(shvrpc::rpcmessage::RpcError::new(
+                                    shvrpc::rpcmessage::RpcErrorCode::InvalidParam,
+                                    "err".to_string()))
+                        );
+                    }
+                }
+                println!("param: {:?}", param);
                 Some(Ok(RpcValue::from("name result")))
             }
             "setCustomParam" [IsSetter, Write] (param: Vec<CustomParam>) => {
@@ -172,7 +180,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
     };
 
     let delay_node = shvclient::fixed_node!(
-        delay_handler<State>(request, client_cmd_tx, app_state) {
+        delay_handler(request, client_cmd_tx, app_state: State) {
             "getDelayed" [None, Browse] => {
                 let mut resp = request.prepare_response().unwrap_or_default();
                 tokio::task::spawn(async move {

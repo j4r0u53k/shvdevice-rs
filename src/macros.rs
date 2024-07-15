@@ -9,9 +9,8 @@
 ///
 ///```
 ///  let node = fixed_node!{
-///         // <app_state_type> and `app_state` parameters are optional but
-///         // have to be present both.
-///         device_handler<i32>(request, client_cmd_tx, app_state) {
+///         // `app_state` parameter is optional and has to be specified with the type parameter.
+///         device_handler(request, client_cmd_tx, app_state: i32) {
 ///             // If a parameter in ( ) is present, the code will handle the type
 ///             // conversion and send an appropriate Error response on a failure.
 ///             // The type has to implements trait `TryFrom<&RpcValue, Error=String>`.
@@ -20,13 +19,16 @@
 ///                 app_state.map(|v| { println!("app_state: {}", *v); });
 ///                 Some(Ok(RpcValue::from("name result")))
 ///             }
-///             "echo" [IsGetter, Browse] (param: Vec<&str>) => {
+///             "echo" [IsGetter, Browse] (param: Vec<String>) => {
 ///                 for s in &param {
-///                     if s.contains("wrong item") {
+///                     if s.contains("foo") {
 ///                         // Return statements are supported
-///                         return Some(Err("Wrong item in param"));
+///                         return Some(Err(shvrpc::rpcmessage::RpcError::new(
+///                                     shvrpc::rpcmessage::RpcErrorCode::InvalidParam,
+///                                     "err".to_string()))
+///                         );
 ///                     }
-///                     println!("param item: {}", s);
+///                     println!("param item: {}", &s);
 ///                 }
 ///                 Some(Ok(param.into()))
 ///             }
@@ -45,7 +47,7 @@
 /// ```
 #[macro_export]
 macro_rules! fixed_node {
-    ($fn_name:ident $(<$T:ty>)? ($request:ident, $client_cmd_tx:ident $(, $app_state:ident)?) {
+    ($fn_name:ident ( $request:ident, $client_cmd_tx:ident $(, $app_state:ident: $T:ty)?) {
         $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ty))? => $body:block)+
     }) => {
 
