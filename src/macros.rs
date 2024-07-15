@@ -1,38 +1,48 @@
 
-// Generator for fixed nodes
-//
-// Usage example:
-//
-// The optional parameter type at methods definitions can be any type for
-// which `TryFrom<&RpcValue, Error=String>` is implemented.
-//
-//  let node = fixed_node!{
-//         device_handler<i32>(request, client_cmd_tx, app_state) {
-//             "name" [IsGetter, Browse] (param: i32) => {
-//                 println!("param: {}", param);
-//                 app_state.map(|v| { println!("app_state: {}", *v); });
-//                 Some(Ok(RpcValue::from("name result")))
-//             }
-//             "echo" [IsGetter, Browse] (param: &str) => {
-//                 println!("param: {}", param);
-//                 Some(Ok(param.into()))
-//             }
-//             "setTable" [IsGetter, Browse] (table: MyTable) => {
-//                 println!("set table: {:?}", table);
-//                 Some(Ok(table.num_items()))
-//             }
-//             "version" [IsGetter, Browse] => {
-//                 Some(Ok(RpcValue::from(42)))
-//             }
-//         }
-//     }
-// }
-//
-// Type in < > and app_state parameres are optional.
-//
-// TODO: documentation
-//
-
+/// Generator for fixed nodes
+///
+/// A convenient macro for generating fixed nodes with methods table,
+/// handlers, automatic parameters checking and response generation
+/// at one place.
+///
+/// Usage:
+///
+///```
+///  let node = fixed_node!{
+///         // <app_state_type> and `app_state` parameters are optional but
+///         // have to be present both.
+///         device_handler<i32>(request, client_cmd_tx, app_state) {
+///             // If a parameter in ( ) is present, the code will handle the type
+///             // conversion and send an appropriate Error response on a failure.
+///             // The type has to implements trait `TryFrom<&RpcValue, Error=String>`.
+///             "name" [IsGetter, Browse] (param: i32) => {
+///                 println!("param: {}", param);
+///                 app_state.map(|v| { println!("app_state: {}", *v); });
+///                 Some(Ok(RpcValue::from("name result")))
+///             }
+///             "echo" [IsGetter, Browse] (param: Vec<&str>) => {
+///                 for s in &param {
+///                     if s.contains("wrong item") {
+///                         // Return statements are supported
+///                         return Some(Err("Wrong item in param"));
+///                     }
+///                     println!("param item: {}", s);
+///                 }
+///                 Some(Ok(param.into()))
+///             }
+///             "setTable" [IsGetter, Browse] (table: MyTable) => {
+///                 handle_table(table, client_cmd_tx);
+///                 // The response is sent in `handle_table` above, so we return `None`
+///                 // to indicate that the generated code shouldn't send the response.
+///                 None
+///             }
+///             "version" [IsGetter, Browse] => {
+///                 Some(Ok(RpcValue::from(42)))
+///             }
+///         }
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident $(<$T:ty>)? ($request:ident, $client_cmd_tx:ident $(, $app_state:ident)?) {
