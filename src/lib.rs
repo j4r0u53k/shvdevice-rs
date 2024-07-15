@@ -1,8 +1,9 @@
 pub mod appnodes;
 pub mod client;
-mod connection;
 pub mod runtime;
 pub mod clientnode;
+mod connection;
+mod macros;
 
 pub use client::{
     AppState,
