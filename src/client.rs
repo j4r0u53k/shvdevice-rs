@@ -32,7 +32,7 @@ mod sealed {
 }
 use sealed::next_subscription_id;
 
-pub struct NotificationsReceiver {
+pub struct Subscriber {
     notifications_rx: Receiver<RpcFrame>,
     // For unsubscribe on drop
     client_cmd_tx: Sender<ClientCommand>,
@@ -41,13 +41,25 @@ pub struct NotificationsReceiver {
     subscription_id: u64,
 }
 
-impl NotificationsReceiver {
-    pub fn recv(&mut self) -> futures::prelude::stream::Next<'_, Receiver<RpcFrame>> {
-        self.notifications_rx.next()
+impl Subscriber {
+    pub fn path_signal(&self) -> (&str, &str) {
+        (&self.path, &self.signal)
     }
 }
 
-impl Drop for NotificationsReceiver {
+impl futures::Stream for Subscriber {
+    type Item = RpcFrame;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().notifications_rx.poll_next_unpin(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.notifications_rx.size_hint()
+    }
+}
+
+impl Drop for Subscriber {
     fn drop(&mut self) {
         if let Err(err) = self.client_cmd_tx.unbounded_send(
             ClientCommand::Unsubscribe {
@@ -83,7 +95,7 @@ impl ClientCommandSender {
         self.sender.unbounded_send(ClientCommand::SendMessage { message })
     }
 
-    pub fn subscribe(&self, path: impl Into<String>, signal: impl Into<String>) -> Result<NotificationsReceiver, TrySendError<ClientCommand>> {
+    pub fn subscribe(&self, path: impl Into<String>, signal: impl Into<String>) -> Result<Subscriber, TrySendError<ClientCommand>> {
         let path = path.into();
         let signal = signal.into();
         let subscription_id = next_subscription_id();
@@ -96,7 +108,7 @@ impl ClientCommandSender {
                 notifications_sender
             }
         ).map(move |_| {
-            NotificationsReceiver {
+            Subscriber {
                 notifications_rx: notifications_receiver,
                 client_cmd_tx: self.sender.clone(),
                 path,
@@ -708,8 +720,8 @@ mod tests {
             rx.next().await.unwrap().to_rpcmesage().unwrap()
         }
 
-        async fn receive_notification(rx: &mut NotificationsReceiver) -> RpcMessage {
-            rx.recv().await.unwrap().to_rpcmesage().unwrap()
+        async fn receive_notification(rx: &mut Subscriber) -> RpcMessage {
+            rx.next().await.unwrap().to_rpcmesage().unwrap()
         }
 
         pub(super) async fn call_method_and_receive_response(
@@ -742,7 +754,7 @@ mod tests {
         }
 
         async fn check_notification_received(
-            notify_rx: &mut NotificationsReceiver,
+            notify_rx: &mut Subscriber,
             path: Option<&str>,
             method: Option<&str>,
             param: Option<&RpcValue>,
