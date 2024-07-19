@@ -7,44 +7,44 @@
 ///
 /// Usage:
 ///
-///```
-///  let node = fixed_node!{
-///         // `app_state` parameter is optional and has to be specified with the type parameter.
-///         device_handler(request, client_cmd_tx, app_state: i32) {
-///             // If a parameter in ( ) is present, the code will handle the type
-///             // conversion and send an appropriate Error response on a failure.
-///             // The type has to implements trait `TryFrom<&RpcValue, Error=String>`.
-///             "name" [IsGetter, Browse] (param: i32) => {
-///                 println!("param: {}", param);
-///                 app_state.map(|v| { println!("app_state: {}", *v); });
-///                 Some(Ok(RpcValue::from("name result")))
-///             }
-///             "echo" [IsGetter, Browse] (param: Vec<String>) => {
-///                 for s in &param {
-///                     if s.contains("foo") {
-///                         // Return statements are supported
-///                         return Some(Err(shvrpc::rpcmessage::RpcError::new(
-///                                     shvrpc::rpcmessage::RpcErrorCode::InvalidParam,
-///                                     "err".to_string()))
-///                         );
-///                     }
-///                     println!("param item: {}", &s);
-///                 }
-///                 Some(Ok(param.into()))
-///             }
-///             "setTable" [IsGetter, Browse] (table: MyTable) => {
-///                 handle_table(table, client_cmd_tx);
-///                 // The response is sent in `handle_table` above, so we return `None`
-///                 // to indicate that the generated code shouldn't send the response.
-///                 None
-///             }
-///             "version" [IsGetter, Browse] => {
-///                 Some(Ok(RpcValue::from(42)))
-///             }
-///         }
-///     }
-/// }
-/// ```
+///#```
+///#  let node = fixed_node!{
+///#         // `app_state` parameter is optional and has to be specified with the type parameter.
+///#         device_handler(request, client_cmd_tx, app_state: i32) {
+///#             // If a parameter in ( ) is present, the code will handle the type
+///#             // conversion and send an appropriate Error response on a failure.
+///#             // The type has to implements trait `TryFrom<&RpcValue, Error=String>`.
+///#             "name" [IsGetter, Browse] (param: i32) => {
+///#                 println!("param: {}", param);
+///#                 app_state.map(|v| { println!("app_state: {}", *v); });
+///#                 Some(Ok(RpcValue::from("name result")))
+///#             }
+///#             "echo" [IsGetter, Browse] (param: Vec<String>) => {
+///#                 for s in &param {
+///#                     if s.contains("foo") {
+///#                         // Return statements are supported
+///#                         return Some(Err(shvrpc::rpcmessage::RpcError::new(
+///#                                     shvrpc::rpcmessage::RpcErrorCode::InvalidParam,
+///#                                     "err".to_string()))
+///#                         );
+///#                     }
+///#                     println!("param item: {}", &s);
+///#                 }
+///#                 Some(Ok(param.into()))
+///#             }
+///#             "setTable" [IsGetter, Browse] (table: MyTable) => {
+///#                 handle_table(table, client_cmd_tx);
+///#                 // The response is sent in `handle_table` above, so we return `None`
+///#                 // to indicate that the generated code shouldn't send the response.
+///#                 None
+///#             }
+///#             "version" [IsGetter, Browse] => {
+///#                 Some(Ok(RpcValue::from(42)))
+///#             }
+///#         }
+///#     }
+///# }
+///# ```
 #[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident ( $request:ident, $client_cmd_tx:ident $(, $app_state:ident: $T:ty)?) {
@@ -69,7 +69,7 @@ macro_rules! fixed_node {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
                     $(let $app_state = $app_state.expect("Application state should be Some");)?
 
-                    async fn handler($request: ::shvrpc::rpcmessage::RpcMessage, #[allow(unused)] $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: AppState<$T>)?)
+                    async fn handler($request: ::shvrpc::rpcmessage::RpcMessage, $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: AppState<$T>)?)
                     -> Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> {
                         match $request.method() {
 

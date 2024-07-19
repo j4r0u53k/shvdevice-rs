@@ -141,7 +141,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
     }
 
     let stateless_node = shvclient::fixed_node!{
-        device_handler(request, client_cmd_tx) {
+        device_handler(request, _tx ) {
             "something" [IsGetter, Browse] (param: i32) => {
                 println!("param: {}", param);
                 Some(Ok(RpcValue::from("name result")))
