@@ -187,6 +187,17 @@ pub enum ClientEvent {
 
 pub struct ClientEventsReceiver(BroadcastReceiver<ClientEvent>);
 
+impl futures::Stream for ClientEventsReceiver {
+    type Item = ClientEvent;
+
+   fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+       self.get_mut().0.poll_next_unpin(cx)
+   }
+   fn size_hint(&self) -> (usize, Option<usize>) {
+       self.0.size_hint()
+   }
+}
+
 impl ClientEventsReceiver {
     pub async fn wait_for_event(&mut self) -> Result<ClientEvent, RecvError> {
         loop {
