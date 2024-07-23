@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::clientnode::{find_longest_prefix, process_local_dir_ls, Route, ClientNode, RequestResult};
+use crate::clientnode::{find_longest_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
@@ -7,6 +7,7 @@ use futures::channel::mpsc::TrySendError;
 use log::*;
 use shvrpc::client::ClientConfig;
 use shvrpc::metamethod::MetaMethod;
+use shvrpc::rpcdiscovery::{DirParam, DirResult, LsParam, LsResult, MethodInfo};
 use shvrpc::rpcframe::RpcFrame;
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
@@ -72,13 +73,36 @@ impl Drop for Subscriber {
     }
 }
 
+#[derive(Clone,Debug)]
+pub enum CallRpcMethodError {
+    CommunicationError(String),
+    DataError(String),
+}
+
+impl std::fmt::Display for CallRpcMethodError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallRpcMethodError::CommunicationError(msg) =>
+                write!(f, "{}", msg),
+            CallRpcMethodError::DataError(msg) =>
+                write!(f, "{}", msg),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientCommandSender {
     pub(crate) sender: Sender<ClientCommand>,
 }
 
 impl ClientCommandSender {
-    pub fn do_rpc_call_param<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>, param: Option<RpcValue>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
+    pub fn do_rpc_call_param<'a>(
+        &self,
+        shvpath: impl Into<&'a str>,
+        method: impl Into<&'a str>,
+        param: Option<RpcValue>,
+    ) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>>
+    {
         let (response_sender, response_receiver) = futures::channel::mpsc::unbounded();
         self.sender.unbounded_send(ClientCommand::RpcCall {
             request: RpcMessage::new_request(shvpath.into(), method.into(), param),
@@ -87,8 +111,121 @@ impl ClientCommandSender {
         .map(|_| response_receiver)
     }
 
-    pub fn do_rpc_call<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
+    pub fn do_rpc_call<'a>(
+        &self,
+        shvpath: impl Into<&'a str>,
+        method: impl Into<&'a str>,
+    ) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>>
+    {
         self.do_rpc_call_param(shvpath, method, None)
+    }
+
+    fn format_call_rpc_err(path: &str, method: &str, error: &str) -> String {
+        format!("RPC call on path `{path}`, method `{method}`, error: {error}")
+    }
+
+    pub async fn call_dir(&self, path: &str, param: DirParam) -> Result<DirResult, CallRpcMethodError> {
+        self.call_rpc_method_into(path, METH_DIR, Some(RpcValue::from(param))).await
+    }
+
+    pub async fn call_dir_brief(&self, path: &str) -> Result<Vec<MethodInfo>, CallRpcMethodError> {
+        self.call_dir_into(path, DirParam::Brief).await
+    }
+
+    pub async fn call_dir_full(&self, path: &str) -> Result<Vec<MethodInfo>, CallRpcMethodError> {
+        self.call_dir_into(path, DirParam::Full).await
+    }
+
+    pub async fn call_dir_exists(&self, path: &str, method: &str) -> Result<bool, CallRpcMethodError> {
+        self.call_dir_into(path, DirParam::Exists(method.into())).await
+    }
+
+    async fn call_dir_into<T>(&self, path: &str, param: DirParam) -> Result<T, CallRpcMethodError>
+    where
+        T: TryFrom<DirResult, Error = String>,
+    {
+        self.call_dir(path, param)
+            .await
+            .and_then(|dir_res|
+                T::try_from(dir_res).map_err(|e|
+                    CallRpcMethodError::DataError(
+                        Self::format_call_rpc_err(path, METH_DIR, &e)
+                    )
+                )
+            )
+    }
+
+    pub async fn call_ls(&self, path: &str, param: LsParam) -> Result<LsResult, CallRpcMethodError> {
+        self.call_rpc_method_into(path, METH_LS, Some(RpcValue::from(param))).await
+    }
+
+    pub async fn call_ls_exists(&self, path: &str, dirname: &str) -> Result<bool, CallRpcMethodError> {
+        self.call_ls_into(path, LsParam::Exists(dirname.into())).await
+    }
+
+    pub async fn call_ls_list(&self, path: &str) -> Result<Vec<String>, CallRpcMethodError> {
+        self.call_ls_into(path, LsParam::List).await
+    }
+
+    async fn call_ls_into<T>(&self, path: &str, param: LsParam) -> Result<T, CallRpcMethodError>
+    where
+        T: TryFrom<LsResult, Error = String>,
+    {
+        self.call_ls(path, param)
+            .await
+            .and_then(|ls_res|
+                T::try_from(ls_res).map_err(|e|
+                    CallRpcMethodError::DataError(
+                        Self::format_call_rpc_err(path, METH_LS, &e)
+                    )
+                )
+            )
+    }
+
+    pub async fn call_rpc_method_into<T>(
+        &self,
+        path: &str,
+        method: &str,
+        param: Option<RpcValue>,
+    ) -> Result<T, CallRpcMethodError>
+    where
+        T: for<'t> TryFrom<&'t RpcValue, Error = String>,
+    {
+        self.call_rpc_method(path, method, param)
+            .await
+            .and_then(|r|
+                T::try_from(&r).map_err(|e|
+                    CallRpcMethodError::DataError(
+                        Self::format_call_rpc_err(path, method, &e)
+                    )
+                )
+            )
+    }
+
+    pub async fn call_rpc_method(
+        &self,
+        path: &str,
+        method: &str,
+        param: Option<RpcValue>,
+    ) -> Result<RpcValue, CallRpcMethodError>
+    {
+        let communication_error = |err: &str| {
+            CallRpcMethodError::CommunicationError(Self::format_call_rpc_err(path, method, err))
+        };
+        let data_error = |err: &str| {
+            CallRpcMethodError::DataError(Self::format_call_rpc_err(path, method, err))
+        };
+
+        self.do_rpc_call_param(path, method, param)
+            .map_err(|err| communication_error(&err.to_string()))?
+            .next()
+            .await
+            .ok_or_else(|| communication_error("could not receive RpcFrame"))?
+            .to_rpcmesage()
+            .map_err(|e| data_error(&e.to_string()))?
+            .result()
+            .map_err(|e| data_error(&e.to_string()))
+            .cloned()
     }
 
     pub fn send_message(&self, message: RpcMessage) -> Result<(), TrySendError<ClientCommand>> {

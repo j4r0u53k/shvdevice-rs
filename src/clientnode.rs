@@ -29,7 +29,7 @@ fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -
             DirParam::Full => {
                 lst.push(mm.to_rpcvalue(metamethod::DirFormat::Map));
             }
-            DirParam::BriefMethod(ref method_name) => {
+            DirParam::Exists(ref method_name) => {
                 if mm.name == method_name {
                     result = mm.to_rpcvalue(metamethod::DirFormat::IMap);
                     break;
