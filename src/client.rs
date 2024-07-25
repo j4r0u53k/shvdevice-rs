@@ -120,12 +120,12 @@ impl ClientCommandSender {
         self.do_rpc_call_param(shvpath, method, None)
     }
 
-    fn format_call_rpc_err(path: &str, method: &str, error: &str) -> String {
+    fn format_call_rpc_err(path: &str, method: &str, error: impl std::fmt::Display) -> String {
         format!("RPC call on path `{path}`, method `{method}`, error: {error}")
     }
 
     pub async fn call_dir(&self, path: &str, param: DirParam) -> Result<DirResult, CallRpcMethodError> {
-        self.call_rpc_method_into(path, METH_DIR, Some(RpcValue::from(param))).await
+        self.call_dir_into(path, param).await
     }
 
     pub async fn call_dir_brief(&self, path: &str) -> Result<Vec<MethodInfo>, CallRpcMethodError> {
@@ -140,23 +140,24 @@ impl ClientCommandSender {
         self.call_dir_into(path, DirParam::Exists(method.into())).await
     }
 
-    async fn call_dir_into<T>(&self, path: &str, param: DirParam) -> Result<T, CallRpcMethodError>
+    async fn call_dir_into<T, E>(&self, path: &str, param: DirParam) -> Result<T, CallRpcMethodError>
     where
-        T: TryFrom<DirResult, Error = String>,
+        T: TryFrom<DirResult, Error = E>,
+        E: std::fmt::Display,
     {
-        self.call_dir(path, param)
+        self.call_rpc_method(path, METH_DIR, Some(RpcValue::from(param)))
             .await
             .and_then(|dir_res|
                 T::try_from(dir_res).map_err(|e|
                     CallRpcMethodError::DataError(
-                        Self::format_call_rpc_err(path, METH_DIR, &e)
+                        Self::format_call_rpc_err(path, METH_DIR, e)
                     )
                 )
             )
     }
 
     pub async fn call_ls(&self, path: &str, param: LsParam) -> Result<LsResult, CallRpcMethodError> {
-        self.call_rpc_method_into(path, METH_LS, Some(RpcValue::from(param))).await
+        self.call_ls_into(path, param).await
     }
 
     pub async fn call_ls_exists(&self, path: &str, dirname: &str) -> Result<bool, CallRpcMethodError> {
@@ -167,47 +168,31 @@ impl ClientCommandSender {
         self.call_ls_into(path, LsParam::List).await
     }
 
-    async fn call_ls_into<T>(&self, path: &str, param: LsParam) -> Result<T, CallRpcMethodError>
+    async fn call_ls_into<T, E>(&self, path: &str, param: LsParam) -> Result<T, CallRpcMethodError>
     where
-        T: TryFrom<LsResult, Error = String>,
+        T: TryFrom<LsResult, Error = E>,
+        E: std::fmt::Display,
     {
-        self.call_ls(path, param)
+        self.call_rpc_method(path, METH_LS, Some(RpcValue::from(param)))
             .await
             .and_then(|ls_res|
                 T::try_from(ls_res).map_err(|e|
                     CallRpcMethodError::DataError(
-                        Self::format_call_rpc_err(path, METH_LS, &e)
+                        Self::format_call_rpc_err(path, METH_LS, e)
                     )
                 )
             )
     }
 
-    pub async fn call_rpc_method_into<T>(
+    pub async fn call_rpc_method<T, E>(
         &self,
         path: &str,
         method: &str,
         param: Option<RpcValue>,
     ) -> Result<T, CallRpcMethodError>
     where
-        T: for<'t> TryFrom<&'t RpcValue, Error = String>,
-    {
-        self.call_rpc_method(path, method, param)
-            .await
-            .and_then(|r|
-                T::try_from(&r).map_err(|e|
-                    CallRpcMethodError::DataError(
-                        Self::format_call_rpc_err(path, method, &e)
-                    )
-                )
-            )
-    }
-
-    pub async fn call_rpc_method(
-        &self,
-        path: &str,
-        method: &str,
-        param: Option<RpcValue>,
-    ) -> Result<RpcValue, CallRpcMethodError>
+        T: TryFrom<RpcValue, Error = E>,
+        E: std::fmt::Display,
     {
         let communication_error = |err: &str| {
             CallRpcMethodError::CommunicationError(Self::format_call_rpc_err(path, method, err))
@@ -226,6 +211,13 @@ impl ClientCommandSender {
             .result()
             .map_err(|e| data_error(&e.to_string()))
             .cloned()
+            .and_then(|r|
+                T::try_from(r).map_err(|e|
+                    CallRpcMethodError::DataError(
+                        Self::format_call_rpc_err(path, method, e)
+                    )
+                )
+            )
     }
 
     pub fn send_message(&self, message: RpcMessage) -> Result<(), TrySendError<ClientCommand>> {
