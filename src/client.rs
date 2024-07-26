@@ -74,19 +74,63 @@ impl Drop for Subscriber {
 }
 
 #[derive(Clone,Debug)]
-pub enum CallRpcMethodError {
-    CommunicationError(String),
-    DataError(String),
+pub enum CallRpcMethodErrorKind {
+    // The receive channel got closed before the response received
+    ConnectionClosed,
+    // Received frame could not be parsed to an RpcMessage
+    InvalidMessage(String),
+    // Got an error instead of a result
+    RpcError(RpcError),
+    // Could not convert result to target data type
+    ResultTypeMismatch(String),
+}
+
+impl std::fmt::Display for CallRpcMethodErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let err_msg = match self {
+            CallRpcMethodErrorKind::ConnectionClosed => "Connection closed",
+            CallRpcMethodErrorKind::InvalidMessage(msg) => msg,
+            CallRpcMethodErrorKind::RpcError(err) => &err.to_string(),
+            CallRpcMethodErrorKind::ResultTypeMismatch(msg) => msg,
+        };
+        write!(f, "{}", err_msg)
+    }
+}
+
+#[derive(Clone,Debug)]
+pub struct CallRpcMethodError {
+    path: String,
+    method: String,
+    error: CallRpcMethodErrorKind,
+}
+
+impl CallRpcMethodError {
+    fn new(path: &str, method: &str, error: CallRpcMethodErrorKind) -> Self {
+        Self {
+            path: path.to_owned(),
+            method: method.to_owned(),
+            error
+        }
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+    pub fn error(&self) -> &CallRpcMethodErrorKind {
+        &self.error
+    }
+
 }
 
 impl std::fmt::Display for CallRpcMethodError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CallRpcMethodError::CommunicationError(msg) =>
-                write!(f, "{}", msg),
-            CallRpcMethodError::DataError(msg) =>
-                write!(f, "{}", msg),
-        }
+        write!(f, "RPC call on path `{path}`, method `{method}`, error: {error}",
+            path = self.path,
+            method = self.method,
+            error = self.error,
+        )
     }
 }
 
@@ -120,10 +164,6 @@ impl ClientCommandSender {
         self.do_rpc_call_param(shvpath, method, None)
     }
 
-    fn format_call_rpc_err(path: &str, method: &str, error: impl std::fmt::Display) -> String {
-        format!("RPC call on path `{path}`, method `{method}`, error: {error}")
-    }
-
     pub async fn call_dir(&self, path: &str, param: DirParam) -> Result<DirResult, CallRpcMethodError> {
         self.call_dir_into(path, param).await
     }
@@ -149,8 +189,10 @@ impl ClientCommandSender {
             .await
             .and_then(|dir_res|
                 T::try_from(dir_res).map_err(|e|
-                    CallRpcMethodError::DataError(
-                        Self::format_call_rpc_err(path, METH_DIR, e)
+                    CallRpcMethodError::new(
+                        path,
+                        METH_DIR,
+                        CallRpcMethodErrorKind::ResultTypeMismatch(e.to_string())
                     )
                 )
             )
@@ -177,8 +219,10 @@ impl ClientCommandSender {
             .await
             .and_then(|ls_res|
                 T::try_from(ls_res).map_err(|e|
-                    CallRpcMethodError::DataError(
-                        Self::format_call_rpc_err(path, METH_LS, e)
+                    CallRpcMethodError::new(
+                        path,
+                        METH_LS,
+                        CallRpcMethodErrorKind::ResultTypeMismatch(e.to_string())
                     )
                 )
             )
@@ -194,29 +238,26 @@ impl ClientCommandSender {
         T: TryFrom<RpcValue, Error = E>,
         E: std::fmt::Display,
     {
-        let communication_error = |err: &str| {
-            CallRpcMethodError::CommunicationError(Self::format_call_rpc_err(path, method, err))
-        };
-        let data_error = |err: &str| {
-            CallRpcMethodError::DataError(Self::format_call_rpc_err(path, method, err))
+        let make_error = |error_kind: CallRpcMethodErrorKind| {
+            CallRpcMethodError::new(path, method, error_kind)
         };
 
+        use CallRpcMethodErrorKind::*;
         self.do_rpc_call_param(path, method, param)
-            .map_err(|err| communication_error(&err.to_string()))?
+            .unwrap_or_else(|err|
+                panic!("Cannot send RPC request to the client core. \
+                    Path: `{path}`, method: `{method}`, error: {err}")
+            )
             .next()
             .await
-            .ok_or_else(|| communication_error("could not receive RpcFrame"))?
+            .ok_or_else(|| make_error(ConnectionClosed))?
             .to_rpcmesage()
-            .map_err(|e| data_error(&e.to_string()))?
+            .map_err(|e| make_error(InvalidMessage(e.to_string())))?
             .result()
-            .map_err(|e| data_error(&e.to_string()))
+            .map_err(|e| make_error(RpcError(e)))
             .cloned()
             .and_then(|r|
-                T::try_from(r).map_err(|e|
-                    CallRpcMethodError::DataError(
-                        Self::format_call_rpc_err(path, method, e)
-                    )
-                )
+                T::try_from(r).map_err(|e| make_error(ResultTypeMismatch(e.to_string())))
             )
     }
 

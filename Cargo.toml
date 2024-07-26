@@ -23,7 +23,7 @@ simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", bran
 
 [dependencies]
 shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", version = "3.0.10" }
-shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master", version = "3.0.5" }
+shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master", version = "3.0.7" }
 futures = "0.3.29"
 futures-time = "3.0.0"
 futures-net = "0.6.0"
