@@ -4,6 +4,7 @@
 use crate::client::{RequestHandler, ClientCommandSender, MethodsGetter, AppState};
 use crate::runtime::spawn_task;
 use log::{error, debug};
+use shvrpc::rpcdiscovery::{DirParam, LsParam};
 use shvrpc::rpcframe::RpcFrame;
 use shvrpc::{metamethod, RpcMessage, RpcMessageMetaTags};
 use shvproto::rpcvalue;
@@ -16,27 +17,6 @@ pub use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
 pub use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 pub use shvproto::{RpcValue, Value};
 
-enum DirParam {
-    Brief,
-    Full,
-    BriefMethod(String),
-}
-impl From<Option<&RpcValue>> for DirParam {
-    fn from(value: Option<&RpcValue>) -> Self {
-        match value {
-            Some(rpcval) => {
-                if rpcval.is_string() {
-                    DirParam::BriefMethod(rpcval.as_str().into())
-                } else if rpcval.as_bool() {
-                    DirParam::Full
-                } else {
-                    DirParam::Brief
-                }
-            }
-            None => DirParam::Brief,
-        }
-    }
-}
 
 fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -> RpcValue {
     let mut result = RpcValue::null();
@@ -49,7 +29,7 @@ fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -
             DirParam::Full => {
                 lst.push(mm.to_rpcvalue(metamethod::DirFormat::Map));
             }
-            DirParam::BriefMethod(ref method_name) => {
+            DirParam::Exists(ref method_name) => {
                 if mm.name == method_name {
                     result = mm.to_rpcvalue(metamethod::DirFormat::IMap);
                     break;
@@ -61,25 +41,6 @@ fn dir<'a>(methods: impl IntoIterator<Item = &'a MetaMethod>, param: DirParam) -
         lst.into()
     } else {
         result
-    }
-}
-
-pub(crate) enum LsParam {
-    List,
-    Exists(String),
-}
-impl From<Option<&RpcValue>> for LsParam {
-    fn from(value: Option<&RpcValue>) -> Self {
-        match value {
-            Some(rpcval) => {
-                if rpcval.is_string() {
-                    LsParam::Exists(rpcval.as_str().into())
-                } else {
-                    LsParam::List
-                }
-            }
-            None => LsParam::List,
-        }
     }
 }
 

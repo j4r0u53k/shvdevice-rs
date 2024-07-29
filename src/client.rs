@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::clientnode::{find_longest_prefix, process_local_dir_ls, Route, ClientNode, RequestResult};
+use crate::clientnode::{find_longest_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
@@ -7,6 +7,7 @@ use futures::channel::mpsc::TrySendError;
 use log::*;
 use shvrpc::client::ClientConfig;
 use shvrpc::metamethod::MetaMethod;
+use shvrpc::rpcdiscovery::{DirParam, DirResult, LsParam, LsResult, MethodInfo};
 use shvrpc::rpcframe::RpcFrame;
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
@@ -72,13 +73,80 @@ impl Drop for Subscriber {
     }
 }
 
+#[derive(Clone,Debug)]
+pub enum CallRpcMethodErrorKind {
+    // The receive channel got closed before the response received
+    ConnectionClosed,
+    // Received frame could not be parsed to an RpcMessage
+    InvalidMessage(String),
+    // Got an error instead of a result
+    RpcError(RpcError),
+    // Could not convert result to target data type
+    ResultTypeMismatch(String),
+}
+
+impl std::fmt::Display for CallRpcMethodErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let err_msg = match self {
+            CallRpcMethodErrorKind::ConnectionClosed => "Connection closed",
+            CallRpcMethodErrorKind::InvalidMessage(msg) => msg,
+            CallRpcMethodErrorKind::RpcError(err) => &err.to_string(),
+            CallRpcMethodErrorKind::ResultTypeMismatch(msg) => msg,
+        };
+        write!(f, "{}", err_msg)
+    }
+}
+
+#[derive(Clone,Debug)]
+pub struct CallRpcMethodError {
+    path: String,
+    method: String,
+    error: CallRpcMethodErrorKind,
+}
+
+impl CallRpcMethodError {
+    fn new(path: &str, method: &str, error: CallRpcMethodErrorKind) -> Self {
+        Self {
+            path: path.to_owned(),
+            method: method.to_owned(),
+            error
+        }
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+    pub fn error(&self) -> &CallRpcMethodErrorKind {
+        &self.error
+    }
+
+}
+
+impl std::fmt::Display for CallRpcMethodError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RPC call on path `{path}`, method `{method}`, error: {error}",
+            path = self.path,
+            method = self.method,
+            error = self.error,
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientCommandSender {
     pub(crate) sender: Sender<ClientCommand>,
 }
 
 impl ClientCommandSender {
-    pub fn do_rpc_call_param<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>, param: Option<RpcValue>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
+    pub fn do_rpc_call_param<'a>(
+        &self,
+        shvpath: impl Into<&'a str>,
+        method: impl Into<&'a str>,
+        param: Option<RpcValue>,
+    ) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>>
+    {
         let (response_sender, response_receiver) = futures::channel::mpsc::unbounded();
         self.sender.unbounded_send(ClientCommand::RpcCall {
             request: RpcMessage::new_request(shvpath.into(), method.into(), param),
@@ -87,8 +155,110 @@ impl ClientCommandSender {
         .map(|_| response_receiver)
     }
 
-    pub fn do_rpc_call<'a>(&self, shvpath: impl Into<&'a str>, method: impl Into<&'a str>) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>> {
+    pub fn do_rpc_call<'a>(
+        &self,
+        shvpath: impl Into<&'a str>,
+        method: impl Into<&'a str>,
+    ) -> Result<Receiver<RpcFrame>, TrySendError<ClientCommand>>
+    {
         self.do_rpc_call_param(shvpath, method, None)
+    }
+
+    pub async fn call_dir(&self, path: &str, param: DirParam) -> Result<DirResult, CallRpcMethodError> {
+        self.call_dir_into(path, param).await
+    }
+
+    pub async fn call_dir_brief(&self, path: &str) -> Result<Vec<MethodInfo>, CallRpcMethodError> {
+        self.call_dir_into(path, DirParam::Brief).await
+    }
+
+    pub async fn call_dir_full(&self, path: &str) -> Result<Vec<MethodInfo>, CallRpcMethodError> {
+        self.call_dir_into(path, DirParam::Full).await
+    }
+
+    pub async fn call_dir_exists(&self, path: &str, method: &str) -> Result<bool, CallRpcMethodError> {
+        self.call_dir_into(path, DirParam::Exists(method.into())).await
+    }
+
+    async fn call_dir_into<T, E>(&self, path: &str, param: DirParam) -> Result<T, CallRpcMethodError>
+    where
+        T: TryFrom<DirResult, Error = E>,
+        E: std::fmt::Display,
+    {
+        self.call_rpc_method(path, METH_DIR, Some(RpcValue::from(param)))
+            .await
+            .and_then(|dir_res|
+                T::try_from(dir_res).map_err(|e|
+                    CallRpcMethodError::new(
+                        path,
+                        METH_DIR,
+                        CallRpcMethodErrorKind::ResultTypeMismatch(e.to_string())
+                    )
+                )
+            )
+    }
+
+    pub async fn call_ls(&self, path: &str, param: LsParam) -> Result<LsResult, CallRpcMethodError> {
+        self.call_ls_into(path, param).await
+    }
+
+    pub async fn call_ls_exists(&self, path: &str, dirname: &str) -> Result<bool, CallRpcMethodError> {
+        self.call_ls_into(path, LsParam::Exists(dirname.into())).await
+    }
+
+    pub async fn call_ls_list(&self, path: &str) -> Result<Vec<String>, CallRpcMethodError> {
+        self.call_ls_into(path, LsParam::List).await
+    }
+
+    async fn call_ls_into<T, E>(&self, path: &str, param: LsParam) -> Result<T, CallRpcMethodError>
+    where
+        T: TryFrom<LsResult, Error = E>,
+        E: std::fmt::Display,
+    {
+        self.call_rpc_method(path, METH_LS, Some(RpcValue::from(param)))
+            .await
+            .and_then(|ls_res|
+                T::try_from(ls_res).map_err(|e|
+                    CallRpcMethodError::new(
+                        path,
+                        METH_LS,
+                        CallRpcMethodErrorKind::ResultTypeMismatch(e.to_string())
+                    )
+                )
+            )
+    }
+
+    pub async fn call_rpc_method<T, E>(
+        &self,
+        path: &str,
+        method: &str,
+        param: Option<RpcValue>,
+    ) -> Result<T, CallRpcMethodError>
+    where
+        T: TryFrom<RpcValue, Error = E>,
+        E: std::fmt::Display,
+    {
+        let make_error = |error_kind: CallRpcMethodErrorKind| {
+            CallRpcMethodError::new(path, method, error_kind)
+        };
+
+        use CallRpcMethodErrorKind::*;
+        self.do_rpc_call_param(path, method, param)
+            .unwrap_or_else(|err|
+                panic!("Cannot send RPC request to the client core. \
+                    Path: `{path}`, method: `{method}`, error: {err}")
+            )
+            .next()
+            .await
+            .ok_or_else(|| make_error(ConnectionClosed))?
+            .to_rpcmesage()
+            .map_err(|e| make_error(InvalidMessage(e.to_string())))?
+            .result()
+            .map_err(|e| make_error(RpcError(e)))
+            .cloned()
+            .and_then(|r|
+                T::try_from(r).map_err(|e| make_error(ResultTypeMismatch(e.to_string())))
+            )
     }
 
     pub fn send_message(&self, message: RpcMessage) -> Result<(), TrySendError<ClientCommand>> {
@@ -186,6 +356,17 @@ pub enum ClientEvent {
 }
 
 pub struct ClientEventsReceiver(BroadcastReceiver<ClientEvent>);
+
+impl futures::Stream for ClientEventsReceiver {
+    type Item = ClientEvent;
+
+   fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+       self.get_mut().0.poll_next_unpin(cx)
+   }
+   fn size_hint(&self) -> (usize, Option<usize>) {
+       self.0.size_hint()
+   }
+}
 
 impl ClientEventsReceiver {
     pub async fn wait_for_event(&mut self) -> Result<ClientEvent, RecvError> {
