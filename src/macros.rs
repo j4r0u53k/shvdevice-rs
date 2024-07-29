@@ -48,7 +48,7 @@
 #[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident ( $request:ident, $client_cmd_tx:ident $(, $app_state:ident: $T:ty)?) {
-        $($method:tt [$($flags:ident)|+, $access:ident] $({ $(($signame:expr, $sigval:expr)),* })? $(($param:ident : $type:ty ))? => $body:block)+
+        $($method:tt [$($flags:ident)|+, $access:ident, $methodparam:expr, $methodresult:expr] $({ $(($signame:expr, $sigval:expr)),* })? $(($param:ident : $type:ty ))? => $body:block)+
     }) => {
 
         {
@@ -57,8 +57,8 @@ macro_rules! fixed_node {
                     name: $method,
                     flags: $($crate::clientnode::Flag::$flags as u32)|+,
                     access: $crate::clientnode::AccessLevel::$access,
-                    param: "",
-                    result: "",
+                    param: $methodparam,
+                    result: $methodresult,
                     signals: &[$($(($signame, $sigval)),*)?],
                     description: "",
                 },)+

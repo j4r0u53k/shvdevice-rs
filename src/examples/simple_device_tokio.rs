@@ -142,11 +142,11 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     let stateless_node = shvclient::fixed_node!{
         device_handler(request, _tx ) {
-            "something" [IsGetter, Browse] (param: i32) => {
+            "something" [IsGetter, Browse, "", ""] (param: i32) => {
                 println!("param: {}", param);
                 Some(Ok(RpcValue::from("name result")))
             }
-            "setString" [IsSetter, Write] (param: Vec<String>) => {
+            "setString" [IsSetter, Write, "String", ""] (param: Vec<String>) => {
                 for s in &param {
                     if s.contains("foo") {
                         return Some(Err(shvrpc::rpcmessage::RpcError::new(
@@ -158,7 +158,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
                 println!("param: {:?}", param);
                 Some(Ok(RpcValue::from("name result")))
             }
-            "setCustomParam" [IsSetter, Write] (param: Vec<CustomParam>) => {
+            "setCustomParam" [IsSetter, Write, "List", ""] (param: Vec<CustomParam>) => {
                 for item in &param {
                     for i in &item.data {
                         println!("param data: {}", i);
@@ -169,11 +169,11 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
                 }
                 Some(Ok(param.into()))
             }
-            "setVecString" [IsSetter, Write] (param: Vec<String>) => {
+            "setVecString" [IsSetter, Write, "List", ""] (param: Vec<String>) => {
                 println!("param data: {:?}", &param);
                 Some(Ok(().into()))
             }
-            "42" [IsGetter, Browse] => {
+            "42" [IsGetter, Browse, "", ""] => {
                 Some(Ok(RpcValue::from(42)))
             }
         }
@@ -181,7 +181,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     let delay_node = shvclient::fixed_node!(
         delay_handler(request, client_cmd_tx, app_state: State) {
-            "getDelayed" [None, Browse ] { ("delayedmod", None) } => {
+            "getDelayed" [None, Browse, "", ""] { ("delayedmod", None) } => {
                 let mut resp = request.prepare_response().unwrap_or_default();
                 tokio::task::spawn(async move {
                     let mut counter = app_state
