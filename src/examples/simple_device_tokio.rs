@@ -181,7 +181,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     let delay_node = shvclient::fixed_node!(
         delay_handler(request, client_cmd_tx, app_state: State) {
-            "getDelayed" [None, Browse] => {
+            "getDelayed" [None, Browse ] { ("delayedmod", None) } => {
                 let mut resp = request.prepare_response().unwrap_or_default();
                 tokio::task::spawn(async move {
                     let mut counter = app_state

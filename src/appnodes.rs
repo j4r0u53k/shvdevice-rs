@@ -20,6 +20,7 @@ const DOT_APP_METHODS: [MetaMethod; 4] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -28,6 +29,7 @@ const DOT_APP_METHODS: [MetaMethod; 4] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -36,6 +38,7 @@ const DOT_APP_METHODS: [MetaMethod; 4] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -44,6 +47,7 @@ const DOT_APP_METHODS: [MetaMethod; 4] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
 ];
@@ -87,6 +91,7 @@ const DOT_DEVICE_METHODS: [MetaMethod; 3] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -95,6 +100,7 @@ const DOT_DEVICE_METHODS: [MetaMethod; 3] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -103,6 +109,7 @@ const DOT_DEVICE_METHODS: [MetaMethod; 3] = [
         access: AccessLevel::Browse,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
 ];

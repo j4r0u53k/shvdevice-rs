@@ -48,17 +48,18 @@
 #[macro_export]
 macro_rules! fixed_node {
     ($fn_name:ident ( $request:ident, $client_cmd_tx:ident $(, $app_state:ident: $T:ty)?) {
-        $($method:tt [$($flags:ident)|+, $access:ident] $(($param:ident : $type:ty))? => $body:block)+
+        $($method:tt [$($flags:ident)|+, $access:ident] $({ $(($signame:expr, $sigval:expr)),* })? $(($param:ident : $type:ty ))? => $body:block)+
     }) => {
 
         {
-            const METHODS: [$crate::clientnode::MetaMethod; $crate::count!($($method)+)] = [
+            const METHODS: &[$crate::clientnode::MetaMethod] = &[
                 $($crate::clientnode::MetaMethod {
                     name: $method,
                     flags: $($crate::clientnode::Flag::$flags as u32)|+,
                     access: $crate::clientnode::AccessLevel::$access,
                     param: "",
                     result: "",
+                    signals: &[$($(($signame, $sigval)),*)?],
                     description: "",
                 },)+
             ];
@@ -99,7 +100,7 @@ macro_rules! fixed_node {
             }
 
             $crate::clientnode::ClientNode::fixed(
-                &METHODS,
+                METHODS,
                 [$crate::clientnode::Route::new(
                     [$($method),+],
                     $crate::request_handler!($fn_name $(,$app_state)?),
