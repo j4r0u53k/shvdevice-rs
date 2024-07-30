@@ -458,6 +458,7 @@ pub(crate) const DIR_LS_METHODS: [MetaMethod; 2] = [
         access: AccessLevel::Browse,
         param: "DirParam",
         result: "DirResult",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -466,6 +467,7 @@ pub(crate) const DIR_LS_METHODS: [MetaMethod; 2] = [
         access: AccessLevel::Browse,
         param: "LsParam",
         result: "LsResult",
+        signals: &[],
         description: "",
     },
 ];
@@ -476,6 +478,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
         access: AccessLevel::Read,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -484,6 +487,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
         access: AccessLevel::Write,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
     MetaMethod {
@@ -492,6 +496,7 @@ pub const PROPERTY_METHODS: [MetaMethod; 3] = [
         access: AccessLevel::Read,
         param: "",
         result: "",
+        signals: &[],
         description: "",
     },
 ];

@@ -70,12 +70,13 @@ fn load_client_config(cli_opts: Opts) -> shvrpc::Result<ClientConfig> {
 
 const METH_GET_DELAYED: &str = "getDelayed";
 
-const DELAY_METHODS: [MetaMethod; 1] = [MetaMethod {
+const DELAY_METHODS: &[MetaMethod] = &[MetaMethod {
     name: METH_GET_DELAYED,
     flags: Flag::IsGetter as u32,
     access: shvrpc::metamethod::AccessLevel::Browse,
     param: "",
     result: "",
+    signals: &[],
     description: "",
 }];
 
@@ -170,7 +171,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
 
     shvclient::Client::new_device(DotAppNode::new("simple_device_async_std"), DotDeviceNode::new("simple_device", "0.1", Some("00000".into())))
         .mount("status/delayed", ClientNode::fixed(
-                &DELAY_METHODS,
+                DELAY_METHODS,
                 [Route::new(
                     [METH_GET_DELAYED],
                     RequestHandler::stateful(delay_node_process_request),
