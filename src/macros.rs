@@ -66,6 +66,8 @@ macro_rules! fixed_node {
 
             async fn $fn_name($request: ::shvrpc::rpcmessage::RpcMessage, $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: Option<$crate::AppState<$T>>)?) {
 
+                use shvrpc::RpcMessageMetaTags;
+
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
                     $(let $app_state = $app_state.expect("Application state should be Some");)?
@@ -93,7 +95,7 @@ macro_rules! fixed_node {
                         }
 
                         if let Err(e) = $client_cmd_tx.send_message(__resp) {
-                            error!("{}: Cannot send response ({e})", stringify!($fn_name));
+                            log::error!("{}: Cannot send response ({e})", stringify!($fn_name));
                         }
                     }
                 };
