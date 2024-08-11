@@ -6,7 +6,7 @@ use futures::{select, FutureExt};
 use log::*;
 use shvrpc::metamethod::MetaMethod;
 use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
-use shvrpc::{RpcMessage, RpcMessageMetaTags};
+use shvrpc::RpcMessage;
 use shvclient::{MethodsGetter, RequestHandler};
 use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, AppState};
