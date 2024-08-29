@@ -63,7 +63,8 @@ mod async_std {
 
     async fn connect(
         address: String,
-    ) -> shvrpc::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)> {
+    ) -> shvrpc::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)>
+    {
         let stream = TcpStream::connect(address).await?;
         let (reader, writer) = stream.split();
         let reader = BufReader::new(reader);
@@ -84,13 +85,17 @@ pub enum ConnectionCommand {
 generics_def!(
     ConnectBounds<
         F: Future<Output = shvrpc::Result<(R, W)>>,
-        R: futures::AsyncRead + Send + Unpin,
-        W: futures::AsyncWrite + Send + Unpin,
+        R: futures::AsyncRead + Send + Unpin + 'static,
+        W: futures::AsyncWrite + Send + Unpin + 'static,
     >
 );
 
 #[generics(ConnectBounds)]
-async fn connection_task<C>(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, connect: C) -> shvrpc::Result<()>
+async fn connection_task<C>(
+    config: ClientConfig,
+    conn_event_sender: Sender<ConnectionEvent>,
+    connect: C,
+) -> shvrpc::Result<()>
 where
     C: FnOnce(String) -> F + Clone,
 {
@@ -170,7 +175,21 @@ where
 
     info!("Connected OK");
     info!("Heartbeat interval set to: {:?}", heartbeat_interval);
-    client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
+    let client_id = client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
+    info!("Login OK, client ID: {client_id}");
+
+    let (writer_tx, mut writer_rx) = futures::channel::mpsc::unbounded();
+    let _writer_task = crate::runtime::spawn_task(async move {
+        debug!("Writer task start");
+        let res: shvrpc::Result<()> = {
+            while let Some(frame) = writer_rx.next().await {
+                frame_writer.send_message(frame).await?;
+            }
+            Ok(())
+        };
+        debug!("Writer task finish");
+        res
+    });
 
     let (conn_cmd_sender, mut conn_cmd_receiver) = futures::channel::mpsc::unbounded();
     conn_event_sender.unbounded_send(ConnectionEvent::Connected(conn_cmd_sender.clone()))?;
@@ -194,7 +213,7 @@ where
                                 ConnectionCommand::SendMessage(message) => {
                                     // reset heartbeat timer
                                     fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
-                                    frame_writer.send_message(message).await?;
+                                    writer_tx.unbounded_send(message)?;
                                 },
                             }
                         },
@@ -223,5 +242,6 @@ where
         }
     }.await;
     conn_event_sender.unbounded_send(ConnectionEvent::Disconnected)?;
+    // writer_task.cancel().await;
     res
 }

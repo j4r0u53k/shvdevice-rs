@@ -21,7 +21,26 @@ pub fn current_task_runtime() -> Runtime {
     Runtime::Unknown
 }
 
-pub fn spawn_task<F>(f: F)
+pub enum TaskHandle<F: futures::Future + Send + 'static> {
+    #[cfg(feature = "tokio")]
+    Tokio(tokio::task::JoinHandle<F::Output>),
+    #[cfg(feature = "async_std")]
+    AsyncStd(async_std::task::JoinHandle<F::Output>),
+
+}
+
+impl<F: futures::Future + Send + 'static> TaskHandle<F> {
+    pub async fn cancel(self) {
+        match self {
+            #[cfg(feature = "tokio")]
+            Self::Tokio(handle) => { handle.abort(); }
+            #[cfg(feature = "async_std")]
+            Self::AsyncStd(handle) => { handle.cancel().await; }
+        }
+    }
+}
+
+pub fn spawn_task<F>(f: F) -> TaskHandle<F>
 where
     F: futures::Future + Send + 'static,
     F::Output: Send + 'static,
@@ -29,9 +48,9 @@ where
 
     match current_task_runtime() {
         #[cfg(feature = "tokio")]
-        Runtime::Tokio => { tokio::spawn(f); },
+        Runtime::Tokio => { TaskHandle::Tokio(tokio::spawn(f)) },
         #[cfg(feature = "async_std")]
-        Runtime::AsyncStd => { async_std::task::spawn(f); },
+        Runtime::AsyncStd => { TaskHandle::AsyncStd(async_std::task::spawn(f)) },
         _ => panic!("Could not find suitable async runtime"),
-    };
+    }
 }
