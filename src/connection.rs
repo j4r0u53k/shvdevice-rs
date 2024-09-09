@@ -2,8 +2,7 @@ use crate::runtime::{current_task_runtime, Runtime};
 use crate::clientnode::METH_PING;
 pub use crate::client::Sender;
 use duration_str::parse;
-use futures::{select, Future, FutureExt, StreamExt};
-use generics_alias::*;
+use futures::{select, AsyncReadExt, FutureExt, StreamExt};
 use log::*;
 pub use shvrpc::client::ClientConfig;
 use shvrpc::client::LoginParams;
@@ -16,61 +15,39 @@ use url::Url;
 pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
     match current_task_runtime() {
         #[cfg(feature = "tokio")]
-        Runtime::Tokio => tokio::spawn_connection_task(config, conn_evt_tx),
+        Runtime::Tokio => {
+            tokio::spawn(connection_task(config.clone(), conn_evt_tx, Runtime::Tokio));
+        }
         #[cfg(feature = "async_std")]
-        Runtime::AsyncStd => async_std::spawn_connection_task(config, conn_evt_tx),
-        _ => panic!("Could not find suitable async runtime"),
+        Runtime::AsyncStd => {
+            async_std::task::spawn(connection_task(config.clone(), conn_evt_tx, Runtime::AsyncStd));
+        }
     };
 }
 
-#[cfg(feature = "tokio")]
-mod tokio {
-    use super::{connection_task, ClientConfig, ConnectionEvent, Sender};
-    use tokio::io::BufReader;
-    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-    use tokio::net::TcpStream;
-    use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
-    pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
-        tokio::spawn(connection_task(config.clone(), conn_evt_tx, connect));
-    }
-
-    async fn connect(
-        address: String,
-    ) -> shvrpc::Result<(Compat<BufReader<OwnedReadHalf>>, Compat<OwnedWriteHalf>)>
-    {
-        let stream = TcpStream::connect(address).await?;
-        let (reader, writer) = stream.into_split();
-        let writer = writer.compat_write();
-        let reader = BufReader::new(reader).compat();
-        Ok((reader, writer))
-    }
-}
-
-#[cfg(feature = "async_std")]
-mod async_std {
-    use super::{connection_task, ClientConfig, ConnectionEvent, Sender};
-    use futures::io::{BufReader, ReadHalf, WriteHalf};
-    use futures::AsyncReadExt;
-    use async_std::net::TcpStream;
-
-    pub(super) fn spawn_connection_task(
-        config: &ClientConfig,
-        conn_evt_tx: Sender<ConnectionEvent>,
-    ) {
-        async_std::task::spawn(connection_task(config.clone(), conn_evt_tx, connect));
-    }
-
-    async fn connect(
-        address: String,
-    ) -> shvrpc::Result<(BufReader<ReadHalf<TcpStream>>, WriteHalf<TcpStream>)>
-    {
-        let stream = TcpStream::connect(address).await?;
-        let (reader, writer) = stream.split();
-        let reader = BufReader::new(reader);
-        Ok((reader, writer))
+async fn connect(address: String, runtime: Runtime)
+    -> shvrpc::Result<(Box<dyn futures::AsyncRead + Send + Unpin>, Box<dyn futures::AsyncWrite + Send + Unpin>)>
+{
+    match runtime {
+        #[cfg(feature = "tokio")]
+        Runtime::Tokio => {
+            use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+            let stream = tokio::net::TcpStream::connect(address).await?;
+            let (reader, writer) = stream.into_split();
+            let writer = writer.compat_write();
+            let reader = tokio::io::BufReader::new(reader).compat();
+            Ok((Box::new(reader), Box::new(writer)))
+        }
+        #[cfg(feature = "async_std")]
+        Runtime::AsyncStd => {
+            let stream = async_std::net::TcpStream::connect(address).await?;
+            let (reader, writer) = stream.split();
+            let reader = futures::io::BufReader::new(reader);
+            Ok((Box::new(reader), Box::new(writer)))
+        }
     }
 }
+
 
 pub enum ConnectionEvent {
     RpcFrameReceived(RpcFrame),
@@ -82,22 +59,11 @@ pub enum ConnectionCommand {
     SendMessage(RpcMessage),
 }
 
-generics_def!(
-    ConnectBounds<
-        F: Future<Output = shvrpc::Result<(R, W)>>,
-        R: futures::AsyncRead + Send + Unpin + 'static,
-        W: futures::AsyncWrite + Send + Unpin + 'static,
-    >
-);
-
-#[generics(ConnectBounds)]
-async fn connection_task<C>(
+async fn connection_task(
     config: ClientConfig,
     conn_event_sender: Sender<ConnectionEvent>,
-    connect: C,
+    runtime: Runtime,
 ) -> shvrpc::Result<()>
-where
-    C: FnOnce(String) -> F + Clone,
 {
     let res = async {
         if let Some(time_str) = &config.reconnect_interval {
@@ -105,7 +71,7 @@ where
                 Ok(interval) => {
                     info!("Reconnect interval set to: {:?}", interval);
                     loop {
-                        match connection_loop(&config, &conn_event_sender, connect.clone()).await {
+                        match connection_loop(&config, &conn_event_sender, runtime).await {
                             Ok(_) => {
                                 return Ok(());
                             }
@@ -122,7 +88,7 @@ where
                 }
             }
         } else {
-            connection_loop(&config, &conn_event_sender, connect).await
+            connection_loop(&config, &conn_event_sender, runtime).await
         }
     }
     .await;
@@ -136,15 +102,11 @@ where
     // by conn_event_sender drop that occurs here.
 }
 
-#[generics(ConnectBounds)]
-async fn connection_loop<C>(
+async fn connection_loop(
     config: &ClientConfig,
     conn_event_sender: &Sender<ConnectionEvent>,
-    connect: C,
-) -> shvrpc::Result<()>
-where
-    C: FnOnce(String) -> F,
-{
+    runtime: Runtime,
+) -> shvrpc::Result<()> {
     let url = Url::parse(&config.url)?;
     let (scheme, host, port) = (
         url.scheme(),
@@ -157,7 +119,7 @@ where
     let address = format!("{host}:{port}");
     // Establish a connection
     info!("Connecting to: {address}");
-    let (reader, writer) = connect(address).await?;
+    let (reader, writer) = connect(address, runtime).await?;
     let mut frame_reader = shvrpc::streamrw::StreamFrameReader::new(reader);
     let mut frame_writer = shvrpc::streamrw::StreamFrameWriter::new(writer);
 

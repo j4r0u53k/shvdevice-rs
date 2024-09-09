@@ -1,12 +1,12 @@
 #[cfg(not(any(feature = "tokio", feature = "async_std")))]
 compile_error!("No async runtime selected. At least one of `tokio`, `async_std` features must be enabled.");
 
+#[derive(Clone, Copy)]
 pub enum Runtime {
     #[cfg(feature = "async_std")]
     AsyncStd,
     #[cfg(feature = "tokio")]
     Tokio,
-    Unknown,
 }
 
 pub fn current_task_runtime() -> Runtime {
@@ -18,7 +18,7 @@ pub fn current_task_runtime() -> Runtime {
     if ::tokio::runtime::Handle::try_current().is_ok() {
         return Runtime::Tokio;
     }
-    Runtime::Unknown
+    panic!("Could not find suitable async runtime");
 }
 
 pub enum TaskHandle<F: futures::Future + Send + 'static> {
@@ -51,6 +51,5 @@ where
         Runtime::Tokio => { TaskHandle::Tokio(tokio::spawn(f)) },
         #[cfg(feature = "async_std")]
         Runtime::AsyncStd => { TaskHandle::AsyncStd(async_std::task::spawn(f)) },
-        _ => panic!("Could not find suitable async runtime"),
     }
 }

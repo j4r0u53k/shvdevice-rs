@@ -1,6 +1,6 @@
 [package]
 name = "shvclient"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 
 [lib]
@@ -20,6 +20,7 @@ required-features = ["async_std"]
 [dev-dependencies]
 clap = { version = "4.4", features = ["derive"] }
 simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
+generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", branch = "main" }
 
 [dependencies]
 shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", version = "3.0.11" }
@@ -34,7 +35,6 @@ async-broadcast = "0.7.1"
 async-std = { version = "1.12.0", features = ["attributes"], optional = true }
 tokio = { version = "1.36.0", features = ["full"], optional = true }
 tokio-util = { version = "0.7.10", features = ["compat"], optional = true }
-generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", branch = "main" }
 
 # NOTE: macro_magic needs to be here as a direct dependency because some functions from
 # there are called in expansion of `generics_inner` macro from generics-alias crate.
