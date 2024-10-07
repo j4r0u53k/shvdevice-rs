@@ -355,6 +355,7 @@ pub enum ClientEvent {
     Disconnected,
 }
 
+#[derive(Clone)]
 pub struct ClientEventsReceiver(BroadcastReceiver<ClientEvent>);
 
 impl futures::Stream for ClientEventsReceiver {
