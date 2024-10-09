@@ -59,7 +59,7 @@ pub(crate) fn process_local_dir_ls<V>(
         return None;
     }
     let shv_path = frame.shv_path().unwrap_or_default();
-    let mount = find_longest_prefix(mounts, shv_path);
+    let mount = find_longest_path_prefix(mounts, shv_path);
     let is_mount_point = mount.is_some();
     let children_on_path = children_on_path(mounts, shv_path);
     let is_leaf = match &children_on_path {
@@ -146,7 +146,7 @@ pub(crate) fn children_on_path<V>(mounts: &BTreeMap<String, V>, path: &str) -> O
 }
 
 /// Helper trait for uniform access to some common methods of BTreeMap<String, V> and HashMap<String, V>
-pub(crate) trait StringMapView<V> {
+pub trait StringMapView<V> {
     fn contains_key_(&self, key: &str) -> bool;
 }
 
@@ -162,7 +162,7 @@ impl<V> StringMapView<V> for HashMap<String, V> {
     }
 }
 
-pub(crate) fn find_longest_prefix<'a, V>(
+pub fn find_longest_path_prefix<'a, V>(
     map: &impl StringMapView<V>,
     shv_path: &'a str,
 ) -> Option<(&'a str, &'a str)> {

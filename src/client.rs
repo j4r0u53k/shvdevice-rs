@@ -1,5 +1,5 @@
 use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
-use crate::clientnode::{find_longest_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
+use crate::clientnode::{find_longest_path_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
@@ -677,7 +677,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                     let local_result = process_local_dir_ls(&self.mounts, &frame);
                     match local_result {
                         None => {
-                            if let Some((mount, path)) = find_longest_prefix(&self.mounts, shv_path) {
+                            if let Some((mount, path)) = find_longest_path_prefix(&self.mounts, shv_path) {
                                 request_msg.set_shvpath(path);
                                 let node = self.mounts.get(mount).unwrap_or_else(|| panic!("A node on path '{mount}' should exist"));
                                 node.process_request(request_msg, mount.to_owned(), client_cmd_tx.clone(), &self.app_state).await;
