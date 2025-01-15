@@ -2,7 +2,7 @@ use shvclient::appnodes::DotAppNode;
 use tokio::sync::RwLock;
 
 use clap::Parser;
-use futures::{select, FutureExt};
+use futures::{select, FutureExt, StreamExt};
 use log::*;
 use shvrpc::metamethod::MetaMethod;
 use shvrpc::{client::ClientConfig, util::parse_log_verbosity};
@@ -12,6 +12,7 @@ use shvclient::clientnode::{ClientNode, PROPERTY_METHODS, SIG_CHNG};
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, AppState};
 use simple_logger::SimpleLogger;
 use shvproto::{RpcValue, TryFromRpcValue};
+use url::Url;
 
 #[derive(Parser, Debug)]
 //#[structopt(name = "device", version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = "SHV call")]
@@ -60,11 +61,17 @@ fn load_client_config(cli_opts: Opts) -> shvrpc::Result<ClientConfig> {
     } else {
         Default::default()
     };
-    config.url = cli_opts.url.unwrap_or(config.url);
+    config.url = match &cli_opts.url {
+        Some(url_str) => Url::parse(url_str)?,
+        None => config.url,
+    };
     config.device_id = cli_opts.device_id.or(config.device_id);
     config.mount = cli_opts.mount.or(config.mount);
-    config.reconnect_interval = cli_opts.reconnect_interval.or(config.reconnect_interval);
-    config.heartbeat_interval.clone_from( &cli_opts.heartbeat_interval);
+    config.reconnect_interval = match cli_opts.reconnect_interval {
+        Some(interval_str) => Some(duration_str::parse(interval_str)?),
+        None => config.reconnect_interval,
+    };
+    config.heartbeat_interval = duration_str::parse(cli_opts.heartbeat_interval)?;
     Ok(config)
 }
 
@@ -72,28 +79,29 @@ type State = RwLock<i32>;
 
 async fn emit_chng_task(
     client_cmd_tx: ClientCommandSender,
-    mut client_evt_rx: ClientEventsReceiver,
+    client_evt_rx: ClientEventsReceiver,
     app_state: AppState<State>,
 ) -> shvrpc::Result<()> {
     info!("signal task started");
 
+    let mut client_evt_rx = client_evt_rx.fuse();
     let mut cnt = 0;
     let mut emit_signal = true;
     loop {
         select! {
-            rx_event = client_evt_rx.recv_event().fuse() => match rx_event {
-                Ok(ClientEvent::Connected) => {
+            rx_event = client_evt_rx.next() => match rx_event {
+                Some(ClientEvent::ConnectionFailed(_)) => {
+                    info!("Connection failed");
+                }
+                Some(ClientEvent::Connected) => {
                     emit_signal = true;
-                    warn!("Device connected");
+                    info!("Device connected");
                 },
-                Ok(ClientEvent::Disconnected) => {
+                Some(ClientEvent::Disconnected) => {
                     emit_signal = false;
-                    warn!("Device disconnected");
+                    info!("Device disconnected");
                 },
-                Err(err) => {
-                    error!("Device event error: {err}");
-                    return Ok(());
-                },
+                None => break,
             },
             _ = futures_time::task::sleep(futures_time::time::Duration::from_secs(3)).fuse() => { }
 
@@ -106,7 +114,12 @@ async fn emit_chng_task(
         }
         let state = app_state.read().await;
         info!("state: {state}");
+        if cnt == 5 {
+            client_cmd_tx.terminate_client();
+        }
     }
+    info!("signal task finished");
+    Ok(())
 }
 
 
@@ -209,7 +222,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
         }
     );
 
-    shvclient::Client::new(DotAppNode::new("simple_device_tokio"))
+    let res = shvclient::Client::new(DotAppNode::new("simple_device_tokio"))
         .mount("stateless", stateless_node)
         .mount("status/delayed", delay_node)
         .mount("status/dyn", ClientNode::dynamic(
@@ -218,5 +231,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
         .with_app_state(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)
-        .await
+        .await;
+    futures_time::task::sleep(futures_time::time::Duration::from_secs(7)).await;
+    res
 }

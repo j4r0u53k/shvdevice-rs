@@ -1,4 +1,4 @@
-use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent};
+use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent, ConnectionFailedKind};
 use crate::clientnode::{find_longest_path_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
@@ -140,6 +140,12 @@ pub struct ClientCommandSender {
 }
 
 impl ClientCommandSender {
+    pub fn terminate_client(&self) {
+        self.sender
+            .unbounded_send(ClientCommand::TerminateClient)
+            .unwrap_or_else(|e| error!("Failed to send TerminateClient command: {e}"));
+    }
+
     pub fn do_rpc_call_param<'a>(
         &self,
         shvpath: impl Into<&'a str>,
@@ -308,6 +314,7 @@ pub enum ClientCommand {
         signal: String,
         subscription_id: u64,
     },
+    TerminateClient,
 }
 
 const BROKER_APP_NODE: &str = ".broker/app";
@@ -350,7 +357,7 @@ impl<T> RequestHandler<T> {
 
 #[derive(Clone)]
 pub enum ClientEvent {
-    /// Client core broadcasts this event when connected to a broker
+    ConnectionFailed(ConnectionFailedKind),
     Connected,
     Disconnected,
 }
@@ -590,6 +597,8 @@ impl<T: Send + Sync + 'static> Client<T> {
                                     if let Err(e) = conn_cmd_sender.unbounded_send(ConnectionCommand::SendMessage(message)) {
                                         error!("Cannot send message through ConnectionCommand channel: {e}");
                                     }
+                                } else {
+                                    warn!("Try to send an RPC message when a connection is not established. Message: {message:?}");
                                 }
                             },
                             RpcCall { request, response_sender } => {
@@ -597,14 +606,16 @@ impl<T: Send + Sync + 'static> Client<T> {
                                 if pending_rpc_calls.insert(req_id, response_sender).is_some() {
                                     error!("request_id {req_id} for async RpcCall has already been registered");
                                 }
-                                client_cmd_tx.send_message(request)?;
+                                client_cmd_tx
+                                    .send_message(request)
+                                    .unwrap_or_else(|e| error!("BUG: Cannot send a message through ClientCommand channel: {e}"));
                             },
                             Subscribe { path, signal, subscription_id, notifications_sender } => {
                                 if subscriptions.add(&path, &signal, subscription_id, notifications_sender) {
                                     let request = create_subscription_request(&path, &signal, SubscriptionRequest::Subscribe);
                                     client_cmd_tx
                                         .send_message(request)
-                                        .expect("Cannot send subscription request through ClientCommand channel");
+                                        .unwrap_or_else(|e| error!("BUG: Cannot send a message through ClientCommand channel: {e}"));
                                 } else {
                                     warn!("Path {} and signal {} have already been subscribed!", &path, &signal);
                                 }
@@ -614,14 +625,22 @@ impl<T: Send + Sync + 'static> Client<T> {
                                     let request = create_subscription_request(&path, &signal, SubscriptionRequest::Unsubscribe);
                                     client_cmd_tx
                                         .send_message(request)
-                                        .expect("Cannot send subscription request through ClientCommand channel");
+                                        .unwrap_or_else(|e| error!("BUG: Cannot send a message through ClientCommand channel: {e}"));
                                 }
+                            },
+                            TerminateClient => {
+                                info!("TerminateClient command received, exiting client loop");
+                                return Ok(());
                             },
                         }
                         next_client_cmd = client_cmd_rx.next().fuse();
                     },
                     None => {
-                        panic!("Couldn't get ClientCommand from the channel");
+                        // This should not happen because we keep a copy of
+                        // client_cmd_tx in this task, so at least one sender
+                        // exists and the close() method of the underlying TX
+                        // channel is not accessible to the user.
+                        panic!("BUG: Couldn't get ClientCommand from the channel");
                     },
                 },
                 conn_event_result = next_conn_event => match conn_event_result {
@@ -631,8 +650,13 @@ impl<T: Send + Sync + 'static> Client<T> {
                             RpcFrameReceived(frame) => {
                                 self.process_rpc_frame(frame, &client_cmd_tx, &mut pending_rpc_calls, &mut subscriptions)
                                     .await
-                                    .expect("Cannot process RPC frame");
+                                    .unwrap_or_else(|e| error!("Cannot process RPC frame: {e}"));
                             },
+                            ConnectionFailed(kind) => {
+                                if let Err(err) = client_events_tx.try_broadcast(ClientEvent::ConnectionFailed(kind)) {
+                                    error!("Client event `ConnectionFailed` broadcast error: {err}");
+                                }
+                            }
                             Connected(sender) => {
                                 conn_cmd_sender = Some(sender);
                                 if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Connected) {
@@ -655,7 +679,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                         next_conn_event = conn_events_rx.next().fuse();
                     }
                     None => {
-                        warn!("Connection task terminated, exiting");
+                        info!("Connection task terminated, exiting client loop");
                         return Ok(());
                     }
                 },

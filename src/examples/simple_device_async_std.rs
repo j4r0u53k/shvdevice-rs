@@ -12,6 +12,7 @@ use shvclient::clientnode::{ClientNode, SIG_CHNG};
 use shvclient::RequestHandler;
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver, Route, AppState};
 use simple_logger::SimpleLogger;
+use url::Url;
 
 #[derive(Parser, Debug)]
 //#[structopt(name = "device", version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = "SHV call")]
@@ -60,11 +61,17 @@ fn load_client_config(cli_opts: Opts) -> shvrpc::Result<ClientConfig> {
     } else {
         Default::default()
     };
-    config.url = cli_opts.url.unwrap_or(config.url);
+    config.url = match &cli_opts.url {
+        Some(url_str) => Url::parse(url_str)?,
+        None => config.url,
+    };
     config.device_id = cli_opts.device_id.or(config.device_id);
     config.mount = cli_opts.mount.or(config.mount);
-    config.reconnect_interval = cli_opts.reconnect_interval.or(config.reconnect_interval);
-    config.heartbeat_interval.clone_from(&cli_opts.heartbeat_interval);
+    config.reconnect_interval = match cli_opts.reconnect_interval {
+        Some(interval_str) => Some(duration_str::parse(interval_str)?),
+        None => config.reconnect_interval,
+    };
+    config.heartbeat_interval = duration_str::parse(cli_opts.heartbeat_interval)?;
     Ok(config)
 }
 
@@ -124,6 +131,10 @@ async fn emit_chng_task(
     loop {
         select! {
             rx_event = client_evt_rx.recv_event().fuse() => match rx_event {
+                Ok(ClientEvent::ConnectionFailed(_)) => {
+                    warn!("Connection failed");
+                    return Ok(());
+                }
                 Ok(ClientEvent::Connected) => {
                     emit_signal = true;
                     warn!("Device connected");
