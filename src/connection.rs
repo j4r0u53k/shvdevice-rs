@@ -1,8 +1,8 @@
 use crate::runtime::{current_task_runtime, Runtime};
 use crate::clientnode::METH_PING;
 pub use crate::client::Sender;
-use duration_str::parse;
-use futures::{select, AsyncReadExt, FutureExt, StreamExt};
+use duration_str::HumanFormat;
+use futures::{select, FutureExt, StreamExt};
 use log::*;
 pub use shvrpc::client::ClientConfig;
 use shvrpc::client::LoginParams;
@@ -10,7 +10,8 @@ use shvrpc::framerw::{FrameReader, FrameWriter};
 use shvrpc::rpcframe::RpcFrame;
 use shvrpc::util::login_from_url;
 use shvrpc::{client, RpcMessage};
-use url::Url;
+#[cfg(feature = "async_std")]
+use futures::AsyncReadExt;
 
 pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<ConnectionEvent>) {
     match current_task_runtime() {
@@ -25,7 +26,7 @@ pub fn spawn_connection_task(config: &ClientConfig, conn_evt_tx: Sender<Connecti
     };
 }
 
-async fn connect(address: String, runtime: Runtime)
+async fn connect(address: &str, runtime: Runtime)
     -> shvrpc::Result<(Box<dyn futures::AsyncRead + Send + Unpin>, Box<dyn futures::AsyncWrite + Send + Unpin>)>
 {
     match runtime {
@@ -48,57 +49,54 @@ async fn connect(address: String, runtime: Runtime)
     }
 }
 
+#[derive(Debug,Clone)]
+pub enum ConnectionFailedKind {
+    NetworkError,
+    LoginFailed,
+}
 
-pub enum ConnectionEvent {
-    RpcFrameReceived(RpcFrame),
+pub(crate) enum ConnectionEvent {
+    ConnectionFailed(ConnectionFailedKind),
     Connected(Sender<ConnectionCommand>),
+    RpcFrameReceived(RpcFrame),
     Disconnected,
 }
 
-pub enum ConnectionCommand {
+pub(crate) enum ConnectionCommand {
     SendMessage(RpcMessage),
 }
 
-async fn connection_task(
-    config: ClientConfig,
-    conn_event_sender: Sender<ConnectionEvent>,
-    runtime: Runtime,
-) -> shvrpc::Result<()>
-{
-    let res = async {
-        if let Some(time_str) = &config.reconnect_interval {
-            match parse(time_str) {
-                Ok(interval) => {
-                    info!("Reconnect interval set to: {:?}", interval);
-                    loop {
-                        match connection_loop(&config, &conn_event_sender, runtime).await {
-                            Ok(_) => {
-                                return Ok(());
-                            }
-                            Err(err) => {
-                                error!("Error in connection loop: {err}");
-                                info!("Reconnecting after: {:?}", interval);
-                                futures_time::task::sleep(interval.into()).await;
-                            }
-                        }
-                    }
+enum ConnectionLoopResult {
+    ConnectionClosed,
+    ClientTerminated,
+}
+
+async fn connection_task(config: ClientConfig, conn_event_sender: Sender<ConnectionEvent>, runtime: Runtime) {
+    async {
+        if let Some(reconnect_interval) = &config.reconnect_interval {
+            info!("Reconnect interval set to: {:?}", reconnect_interval);
+            loop {
+                // Check if the client loop has been terminated before trying to connect.
+                // The client loop termination is then detected in the connection_loop based on
+                // conn_event_receiver, but it happens only after a successful connection.
+                if conn_event_sender.is_closed() {
+                    warn!("conn_event_sender is closed");
+                    break;
                 }
-                Err(err) => {
-                    Err(err.into())
+                match connection_loop(&config, &conn_event_sender, runtime).await {
+                    ConnectionLoopResult::ClientTerminated => break,
+                    ConnectionLoopResult::ConnectionClosed => {
+                        info!("Connection closed, reconnecting after {}", reconnect_interval.human_format());
+                        futures_time::task::sleep((*reconnect_interval).into()).await;
+                    }
                 }
             }
         } else {
-            connection_loop(&config, &conn_event_sender, runtime).await
+            connection_loop(&config, &conn_event_sender, runtime).await;
         }
     }
     .await;
-
-    match &res {
-        Ok(_) => info!("Connection task finished OK"),
-        Err(e) => error!("Connection task finished with error: {e}"),
-    }
-    res
-    // NOTE: The connection_task termination is detected in the device_task
+    // NOTE: The connection_task termination is detected in the client_task
     // by conn_event_sender drop that occurs here.
 }
 
@@ -106,26 +104,32 @@ async fn connection_loop(
     config: &ClientConfig,
     conn_event_sender: &Sender<ConnectionEvent>,
     runtime: Runtime,
-) -> shvrpc::Result<()> {
-    let url = Url::parse(&config.url)?;
-    let (scheme, host, port) = (
-        url.scheme(),
-        url.host_str().unwrap_or_default(),
-        url.port().unwrap_or(3755),
+) -> ConnectionLoopResult {
+    let (host, port) = (
+        config.url.host_str().unwrap_or_default(),
+        config.url.port().unwrap_or(3755),
     );
-    if scheme != "tcp" {
-        panic!("Scheme {scheme} is not supported yet.");
-    }
     let address = format!("{host}:{port}");
+
     // Establish a connection
     info!("Connecting to: {address}");
-    let (reader, writer) = connect(address, runtime).await?;
-    let mut frame_reader = shvrpc::streamrw::StreamFrameReader::new(reader);
-    let mut frame_writer = shvrpc::streamrw::StreamFrameWriter::new(writer);
+    let (mut frame_reader, mut frame_writer) = match connect(&address, runtime).await {
+        Ok((rd, wr)) => (shvrpc::streamrw::StreamFrameReader::new(rd), shvrpc::streamrw::StreamFrameWriter::new(wr)),
+        Err(err) => {
+            warn!("Cannot connect to {address}: {err}");
+            conn_event_sender
+                .unbounded_send(ConnectionEvent::ConnectionFailed(ConnectionFailedKind::NetworkError))
+                .unwrap_or_else(|e| debug!("ConnectionEvent::ConnectionFailed(NetworkError) send failed: {e}"));
+            return ConnectionLoopResult::ConnectionClosed;
+        }
+    };
+    info!("Connected OK");
 
     // login
-    let (user, password) = login_from_url(&url);
-    let heartbeat_interval = config.heartbeat_interval_duration()?;
+    let (user, password) = login_from_url(&config.url);
+    let heartbeat_interval = config.heartbeat_interval;
+    info!("Heartbeat interval set to: {:?}", heartbeat_interval);
+
     let login_params = LoginParams {
         user,
         password,
@@ -135,9 +139,16 @@ async fn connection_loop(
         ..Default::default()
     };
 
-    info!("Connected OK");
-    info!("Heartbeat interval set to: {:?}", heartbeat_interval);
-    let client_id = client::login(&mut frame_reader, &mut frame_writer, &login_params).await?;
+    let client_id = match client::login(&mut frame_reader, &mut frame_writer, &login_params).await {
+        Ok(id) => id,
+        Err(err) => {
+            warn!("Login failed: {err}");
+            conn_event_sender
+                .unbounded_send(ConnectionEvent::ConnectionFailed(ConnectionFailedKind::LoginFailed))
+                .unwrap_or_else(|e| debug!("ConnectionEvent::ConnectionFailed(LoginFailed) send failed: {e}"));
+            return ConnectionLoopResult::ConnectionClosed;
+        }
+    };
     info!("Login OK, client ID: {client_id}");
 
     let (writer_tx, mut writer_rx) = futures::channel::mpsc::unbounded();
@@ -145,7 +156,9 @@ async fn connection_loop(
         debug!("Writer task start");
         let res: shvrpc::Result<()> = {
             while let Some(frame) = writer_rx.next().await {
-                frame_writer.send_message(frame).await?;
+                frame_writer.send_message(frame)
+                    .await
+                    .inspect_err(|err| warn!("Send frame error: {err}"))?;
             }
             Ok(())
         };
@@ -153,12 +166,15 @@ async fn connection_loop(
         res
     });
 
-    let (conn_cmd_sender, mut conn_cmd_receiver) = futures::channel::mpsc::unbounded();
-    conn_event_sender.unbounded_send(ConnectionEvent::Connected(conn_cmd_sender.clone()))?;
+    let (conn_cmd_sender, conn_cmd_receiver) = futures::channel::mpsc::unbounded();
 
-    let res: shvrpc::Result<()> = async move {
+    conn_event_sender
+        .unbounded_send(ConnectionEvent::Connected(conn_cmd_sender))
+        .unwrap_or_else(|e| debug!("ConnectionEvent::Connected send failed: {e}"));
+
+    async move {
         let mut fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
-        let mut next_conn_cmd = conn_cmd_receiver.next().fuse();
+        let mut conn_cmd_receiver = conn_cmd_receiver.fuse();
         let mut fut_receive_frame = frame_reader.receive_frame().fuse();
 
         loop {
@@ -166,32 +182,50 @@ async fn connection_loop(
                 _ = fut_heartbeat_timeout => {
                     // send heartbeat
                     let message = RpcMessage::new_request(".app", METH_PING, None);
-                    conn_cmd_sender.unbounded_send(ConnectionCommand::SendMessage(message))?;
+                    // reset heartbeat timer
+                    fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
+                    if let Err(err) = writer_tx.unbounded_send(message) {
+                        warn!("Cannot send message to the writer task: {err}");
+                        conn_event_sender
+                            .unbounded_send(ConnectionEvent::Disconnected)
+                            .unwrap_or_else(|e| debug!("ConnectionEvent::Disconnected send failed: {e}"));
+                        return ConnectionLoopResult::ConnectionClosed;
+                    }
                 },
-                conn_cmd_result = next_conn_cmd => {
+                conn_cmd_result = conn_cmd_receiver.next() => {
                     match conn_cmd_result {
                         Some(connection_command) => {
                             match connection_command {
                                 ConnectionCommand::SendMessage(message) => {
                                     // reset heartbeat timer
                                     fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
-                                    writer_tx.unbounded_send(message)?;
+                                    if let Err(err) = writer_tx.unbounded_send(message) {
+                                        warn!("Cannot send message to the writer task: {err}");
+                                        conn_event_sender
+                                            .unbounded_send(ConnectionEvent::Disconnected)
+                                            .unwrap_or_else(|e| debug!("ConnectionEvent::Disconnected send failed: {e}"));
+                                        return ConnectionLoopResult::ConnectionClosed;
+                                    }
                                 },
                             }
                         },
                         None => {
-                            error!("Couldn't get ConnectionCommand from the channel");
+                            // The only instance of TX is gone, the client loop has terminated
+                            warn!("Connection command channel closed, client loop has terminated");
+                            return ConnectionLoopResult::ClientTerminated;
                         },
                     }
-                    next_conn_cmd = conn_cmd_receiver.next().fuse();
                 }
                 receive_frame_result = fut_receive_frame => {
                     match receive_frame_result {
                         Ok(frame) => {
-                            conn_event_sender.unbounded_send(ConnectionEvent::RpcFrameReceived(frame))?;
+                            conn_event_sender
+                                .unbounded_send(ConnectionEvent::RpcFrameReceived(frame))
+                                .unwrap_or_else(|e| debug!("ConnectionEvent::RpcFrameReceived send failed: {e}"));
                         }
                         Err(e) => {
-                            return Err(format!("Receive frame error - {e}").into());
+                            warn!("Receive frame error: {e}");
+                            return ConnectionLoopResult::ConnectionClosed;
                         }
                     }
                     // The drop before the reassignment is needed because the future is holding
@@ -202,8 +236,5 @@ async fn connection_loop(
                 }
             }
         }
-    }.await;
-    conn_event_sender.unbounded_send(ConnectionEvent::Disconnected)?;
-    // writer_task.cancel().await;
-    res
+    }.await
 }
