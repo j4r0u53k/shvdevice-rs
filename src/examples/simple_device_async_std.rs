@@ -133,7 +133,6 @@ async fn emit_chng_task(
             rx_event = client_evt_rx.recv_event().fuse() => match rx_event {
                 Ok(ClientEvent::ConnectionFailed(_)) => {
                     warn!("Connection failed");
-                    return Ok(());
                 }
                 Ok(ClientEvent::Connected) => {
                     emit_signal = true;
@@ -145,7 +144,7 @@ async fn emit_chng_task(
                 },
                 Err(err) => {
                     error!("Device event error: {err}");
-                    return Ok(());
+                    break;
                 },
             },
             _ = futures_time::task::sleep(futures_time::time::Duration::from_secs(3)).fuse() => { }
@@ -157,9 +156,14 @@ async fn emit_chng_task(
             info!("signal task emits a value: {cnt}");
             cnt += 1;
         }
+        if cnt == 5 {
+            client_cmd_tx.terminate_client();
+        }
         let state = app_state.read().await;
         info!("state: {state}");
     }
+    info!("signal task finished");
+    Ok(())
 }
 
 #[async_std::main]

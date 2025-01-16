@@ -222,7 +222,7 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
         }
     );
 
-    let res = shvclient::Client::new(DotAppNode::new("simple_device_tokio"))
+    shvclient::Client::new(DotAppNode::new("simple_device_tokio"))
         .mount("stateless", stateless_node)
         .mount("status/delayed", delay_node)
         .mount("status/dyn", ClientNode::dynamic(
@@ -231,7 +231,5 @@ pub(crate) async fn main() -> shvrpc::Result<()> {
         .with_app_state(cnt)
         .run_with_init(&client_config, app_tasks)
         // .run(&client_config)
-        .await;
-    futures_time::task::sleep(futures_time::time::Duration::from_secs(7)).await;
-    res
+        .await
 }
