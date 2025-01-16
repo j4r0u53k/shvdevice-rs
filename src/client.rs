@@ -451,7 +451,7 @@ impl Subscriptions {
         let added_new = path_signal_subscriptions.is_empty();
 
         if path_signal_subscriptions.insert(subscription_id, notifications_sender).is_some() {
-            panic!("BUG: Subscription with the same ID {} for path: {}, method: {}. Dump: {:?}",
+            panic!("Tried to add a subscription with already existing ID: {}. Path: {}, method: {}. Dump: {:?}",
                 subscription_id, path, signal, &self);
         }
 
@@ -594,28 +594,28 @@ impl<T: Send + Sync + 'static> Client<T> {
                         match client_cmd {
                             SendMessage { message } => {
                                 if let Some(ref conn_cmd_sender) = conn_cmd_sender {
-                                    if let Err(e) = conn_cmd_sender.unbounded_send(ConnectionCommand::SendMessage(message)) {
-                                        error!("Cannot send message through ConnectionCommand channel: {e}");
-                                    }
+                                    conn_cmd_sender
+                                        .unbounded_send(ConnectionCommand::SendMessage(message))
+                                        .unwrap_or_else(|e| error!("Cannot send SendMessage command through ConnectionCommand channel: {e}"));
                                 } else {
-                                    warn!("Try to send an RPC message when a connection is not established. Message: {message:?}");
+                                    warn!("Client tries to send an RPC message while a connection to the broker is not established. Message: {message:?}");
                                 }
                             },
                             RpcCall { request, response_sender } => {
                                 let req_id = request.request_id().expect("request_id in the request of a RpcCall must be set");
                                 if pending_rpc_calls.insert(req_id, response_sender).is_some() {
-                                    error!("request_id {req_id} for async RpcCall has already been registered");
+                                    error!("Request ID `{req_id}` for async RpcCall has already been registered");
                                 }
                                 client_cmd_tx
                                     .send_message(request)
-                                    .unwrap_or_else(|e| error!("BUG: Cannot send a message through ClientCommand channel: {e}"));
+                                    .unwrap_or_else(|e| error!("Cannot send RpcCall command through ClientCommand channel: {e}"));
                             },
                             Subscribe { path, signal, subscription_id, notifications_sender } => {
                                 if subscriptions.add(&path, &signal, subscription_id, notifications_sender) {
                                     let request = create_subscription_request(&path, &signal, SubscriptionRequest::Subscribe);
                                     client_cmd_tx
                                         .send_message(request)
-                                        .unwrap_or_else(|e| error!("BUG: Cannot send a message through ClientCommand channel: {e}"));
+                                        .unwrap_or_else(|e| error!("Cannot send Subscribe command through ClientCommand channel: {e}"));
                                 } else {
                                     warn!("Path {} and signal {} have already been subscribed!", &path, &signal);
                                 }
@@ -625,7 +625,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                                     let request = create_subscription_request(&path, &signal, SubscriptionRequest::Unsubscribe);
                                     client_cmd_tx
                                         .send_message(request)
-                                        .unwrap_or_else(|e| error!("BUG: Cannot send a message through ClientCommand channel: {e}"));
+                                        .unwrap_or_else(|e| error!("Cannot send Unsubscribe command through ClientCommand channel: {e}"));
                                 }
                             },
                             TerminateClient => {
@@ -640,7 +640,7 @@ impl<T: Send + Sync + 'static> Client<T> {
                         // client_cmd_tx in this task, so at least one sender
                         // exists and the close() method of the underlying TX
                         // channel is not accessible to the user.
-                        panic!("BUG: Couldn't get ClientCommand from the channel");
+                        panic!("ClientCommand channel has been unexpectedly closed");
                     },
                 },
                 conn_event_result = next_conn_event => match conn_event_result {
