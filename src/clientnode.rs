@@ -10,7 +10,6 @@ use shvrpc::{metamethod, RpcMessage, RpcMessageMetaTags};
 use shvproto::rpcvalue;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::format;
-use std::rc::Rc;
 use std::sync::Arc;
 // Reexport for use in the macros
 pub use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
@@ -204,7 +203,7 @@ impl<T> Route<T> {
     }
 }
 
-type StaticNodeHandlers<T> = BTreeMap<String, Rc<RequestHandler<T>>>;
+type StaticNodeHandlers<T> = BTreeMap<String, Arc<RequestHandler<T>>>;
 
 struct FixedNode<'a, T> {
     methods: Vec<&'a MetaMethod>,
@@ -233,7 +232,7 @@ impl<'a, T> FixedNode<'a, T> {
             if route.methods.iter().any(|m| m == METH_DIR) {
                 panic!("Custom implementation of 'dir', which is handled by the library");
             }
-            let handler = Rc::new(route.handler);
+            let handler = Arc::new(route.handler);
             route.methods.iter().for_each(|m| {
                 methods
                     .iter()
@@ -268,7 +267,7 @@ pub trait ConstantNode {
 enum NodeVariant<'a, T> {
     Fixed(FixedNode<'a, T>),
     Dynamic(Arc<DynamicNode<T>>),
-    Constant(Box<dyn ConstantNode>),
+    Constant(Box<dyn ConstantNode + Send + Sync>),
 }
 
 pub struct ClientNode<'a, T>(NodeVariant<'a, T>);
@@ -287,7 +286,7 @@ impl<'a, T: Sync + Send + 'static> ClientNode<'a, T> {
     // should not be needed outside of the library.
     pub(crate) fn constant<N>(node: N) -> Self
     where
-        N: ConstantNode + 'static,
+        N: ConstantNode + Send + Sync + 'static,
     {
         Self(NodeVariant::Constant(Box::new(node)))
     }
