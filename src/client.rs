@@ -13,6 +13,7 @@ use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvproto::RpcValue;
 use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -24,14 +25,16 @@ pub type Receiver<K> = futures::channel::mpsc::UnboundedReceiver<K>;
 
 type BroadcastReceiver<K> = async_broadcast::Receiver<K>;
 
-mod sealed {
+mod private {
     static SUBSCRIPTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-    pub fn next_subscription_id() -> u64 {
+    pub(super) fn next_subscription_id() -> u64 {
         SUBSCRIPTION_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
+
+    pub trait Sealed { }
 }
-use sealed::next_subscription_id;
+use private::next_subscription_id;
 
 pub struct Subscriber {
     notifications_rx: Receiver<RpcFrame>,
@@ -484,33 +487,52 @@ impl Subscriptions {
     }
 }
 
-pub struct Client<T> {
+pub trait ClientVariant: private::Sealed { }
+
+pub enum Plain { }
+impl ClientVariant for Plain { }
+impl private::Sealed for Plain { }
+
+pub enum Full { }
+impl ClientVariant for Full { }
+impl private::Sealed for Full { }
+
+pub struct Client<V: ClientVariant, T> {
     mounts: BTreeMap<String, ClientNode<'static, T>>,
     app_state: Option<AppState<T>>,
+    variant_marker: PhantomData<V>,
 }
 
-impl<T: Send + Sync + 'static> Client<T> {
-    pub fn new(app_node: crate::appnodes::DotAppNode) -> Self {
-        let mut client = Self {
+impl Client<Plain, ()> {
+    pub fn new_plain() -> Self {
+        Self {
             mounts: Default::default(),
             app_state: Default::default(),
+            variant_marker: PhantomData,
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> Client<Full, T> {
+    pub fn new(app_node: crate::appnodes::DotAppNode) -> Self {
+        let client = Self {
+            mounts: Default::default(),
+            app_state: Default::default(),
+            variant_marker: PhantomData,
         };
-        client.mount(".app", ClientNode::constant(app_node));
-        client
+        client.mount(".app", ClientNode::constant(app_node))
     }
 
-    pub fn new_device(app_node: crate::appnodes::DotAppNode, device_node: crate::appnodes::DotDeviceNode) -> Self {
-        let mut client = Self::new(app_node);
-        client.mount(".device", ClientNode::constant(device_node));
-        client
+    pub fn device(self, device_node: crate::appnodes::DotDeviceNode) -> Self {
+        self.mount(".device", ClientNode::constant(device_node))
     }
 
-    pub fn mount<P: Into<String>>(&mut self, path: P, node: ClientNode<'static, T>) -> &mut Self {
+    pub fn mount<P: Into<String>>(mut self, path: P, node: ClientNode<'static, T>) -> Self {
         self.mounts.insert(path.into(), node);
         self
     }
 
-    pub fn mount_fixed<P, M, R>(&mut self, path: P, defined_methods: M, routes: R) -> &mut Self
+    pub fn mount_fixed<P, M, R>(mut self, path: P, defined_methods: M, routes: R) -> Self
     where
         P: Into<String>,
         M: IntoIterator<Item = &'static MetaMethod>,
@@ -520,7 +542,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn mount_dynamic<P>(&mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> &mut Self
+    pub fn mount_dynamic<P>(mut self, path: P, methods_getter: MethodsGetter<T>, request_handler: RequestHandler<T>) -> Self
     where
         P: Into<String>,
     {
@@ -528,13 +550,23 @@ impl<T: Send + Sync + 'static> Client<T> {
         self
     }
 
-    pub fn with_app_state(&mut self, app_state: AppState<T>) -> &mut Self {
+    pub fn with_app_state(mut self, app_state: AppState<T>) -> Self {
         self.app_state = Some(app_state);
         self
     }
 
+    pub async fn run(self, config: &ClientConfig) -> shvrpc::Result<()> {
+        self.run_with_init_opt(
+            config,
+            Option::<fn(_,_)>::None,
+        )
+        .await
+    }
+}
+
+impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
     async fn run_with_init_opt<H>(
-        &mut self,
+        &self,
         config: &ClientConfig,
         init_handler: Option<H>,
     ) -> shvrpc::Result<()>
@@ -546,15 +578,7 @@ impl<T: Send + Sync + 'static> Client<T> {
         self.client_loop(conn_evt_rx, init_handler).await
     }
 
-    pub async fn run(&mut self, config: &ClientConfig) -> shvrpc::Result<()> {
-        self.run_with_init_opt(
-            config,
-            Option::<fn(ClientCommandSender, ClientEventsReceiver)>::None,
-        )
-        .await
-    }
-
-    pub async fn run_with_init<H>(&mut self, config: &ClientConfig, handler: H) -> shvrpc::Result<()>
+    pub async fn run_with_init<H>(self, config: &ClientConfig, handler: H) -> shvrpc::Result<()>
     where
         H: FnOnce(ClientCommandSender, ClientEventsReceiver),
     {
@@ -562,7 +586,7 @@ impl<T: Send + Sync + 'static> Client<T> {
     }
 
     async fn client_loop<H>(
-        &mut self,
+        &self,
         mut conn_events_rx: Receiver<ConnectionEvent>,
         init_handler: Option<H>,
     ) -> shvrpc::Result<()>
@@ -1089,7 +1113,7 @@ mod tests {
 
         // Request handling tests
         //
-        pub(super) fn make_client_with_handlers() -> Client<()> {
+        pub(super) fn make_client_with_handlers() -> Client<Full,()> {
             async fn methods_getter(path: String, _: Option<AppState<()>>) -> Option<Vec<&'static MetaMethod>> {
                 if path.is_empty() {
                     Some(PROPERTY_METHODS.iter().collect())
@@ -1119,18 +1143,17 @@ mod tests {
                 client_cmd_tx.send_message(resp).unwrap();
             }
 
-            let mut client = Client::new(DotAppNode::new("test"));
-            client.mount_dynamic("dynamic/sync",
-                                 MethodsGetter::new(methods_getter),
-                                 RequestHandler::stateless(request_handler));
-            client.mount_dynamic("dynamic/async",
-                                 MethodsGetter::new(methods_getter),
-                                 RequestHandler::stateless(request_handler));
-            client.mount_fixed("static",
-                                PROPERTY_METHODS.iter(),
-                                [Route::new([crate::clientnode::METH_GET, crate::clientnode::METH_SET],
-                                            RequestHandler::stateless(request_handler))]);
-            client
+            Client::new(DotAppNode::new("test"))
+                .mount_dynamic("dynamic/sync",
+                    MethodsGetter::new(methods_getter),
+                    RequestHandler::stateless(request_handler))
+                .mount_dynamic("dynamic/async",
+                    MethodsGetter::new(methods_getter),
+                    RequestHandler::stateless(request_handler))
+                .mount_fixed("static",
+                    PROPERTY_METHODS.iter(),
+                    [Route::new([crate::clientnode::METH_GET, crate::clientnode::METH_SET],
+                        RequestHandler::stateless(request_handler))])
         }
 
         async fn recv_request_get_response(conn_mock: &mut ConnectionMock, request: RpcMessage) -> RpcMessage {
@@ -1229,7 +1252,7 @@ mod tests {
             mk_test_fn!($name ($(#[$attr])*) Some($client));
         };
         ($name:ident $(#[$attr:meta])*) => {
-            mk_test_fn!($name ($(#[$attr])*) None::<$crate::Client<()>>);
+            mk_test_fn!($name ($(#[$attr])*) None::<$crate::Client<Full,()>>);
         };
     }
 
@@ -1263,12 +1286,8 @@ mod tests {
                 $(def_test!($name $(#[$attr])* $(,$client)?);)+
 
                 #[generics(TestDriverBounds)]
-                async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
-                    let mut client = if let Some(client) = custom_client {
-                        client
-                    } else {
-                        Client::new(DotAppNode::new("test"))
-                    };
+                async fn init_client(test_drv: C, custom_client: Option<Client<Full,S>>) {
+                    let client = custom_client.unwrap_or_else(|| Client::new(DotAppNode::new("test")));
                     let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
                     let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
                     let init_handler = move |cli_cmd_tx, cli_evt_rx| {
@@ -1281,7 +1300,7 @@ mod tests {
                 }
 
                 #[generics(TestDriverBounds)]
-                pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
+                pub fn run_test(test_drv: C, custom_client: Option<Client<Full,S>>) {
                     let _ = simple_logger::init_with_level(Level::Debug);
 
                     ::tokio::runtime::Builder::new_multi_thread()
@@ -1299,12 +1318,8 @@ mod tests {
                 $(def_test!($name $(#[$attr])* $(,$client)?);)+
 
                 #[generics(TestDriverBounds)]
-                async fn init_client(test_drv: C, custom_client: Option<Client<S>>) {
-                    let mut client = if let Some(client) = custom_client {
-                        client
-                    } else {
-                        Client::new(DotAppNode::new("test"))
-                    };
+                async fn init_client(test_drv: C, custom_client: Option<Client<Full,S>>) {
+                    let client = custom_client.unwrap_or_else(|| Client::new(DotAppNode::new("test")));
                     let (conn_evt_tx, conn_evt_rx) = futures::channel::mpsc::unbounded::<ConnectionEvent>();
                     let (join_handle_tx, mut join_handle_rx) = futures::channel::mpsc::unbounded();
                     let init_handler = move |cli_cmd_tx, cli_evt_rx| {
@@ -1317,7 +1332,7 @@ mod tests {
                 }
 
                 #[generics(TestDriverBounds)]
-                pub fn run_test(test_drv: C, custom_client: Option<Client<S>>) {
+                pub fn run_test(test_drv: C, custom_client: Option<Client<Full,S>>) {
                     let _ = simple_logger::init_with_level(Level::Debug);
 
                     ::async_std::task::block_on(init_client(test_drv, custom_client));
