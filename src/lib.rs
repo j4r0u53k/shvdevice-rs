@@ -15,3 +15,4 @@ pub use client::{
     RequestHandler,
 };
 pub use clientnode::Route;
+pub use connection::ConnectionFailedKind;
