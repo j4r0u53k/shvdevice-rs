@@ -128,6 +128,9 @@ async fn connection_loop(
     // login
     let (user, password) = login_from_url(&config.url);
     let heartbeat_interval = config.heartbeat_interval;
+    // The read timeout can be set to heartbeat interval given that the interval is
+    // significantly larger than roundtrip time.
+    let read_timeout = heartbeat_interval;
     info!("Heartbeat interval set to: {:?}", heartbeat_interval);
 
     let login_params = LoginParams {
@@ -172,8 +175,9 @@ async fn connection_loop(
         .unbounded_send(ConnectionEvent::Connected(conn_cmd_sender))
         .unwrap_or_else(|e| debug!("ConnectionEvent::Connected send failed: {e}"));
 
-    async move {
+    async {
         let mut fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
+        let mut fut_read_timeout = futures_time::task::sleep(read_timeout.into()).fuse();
         let mut conn_cmd_receiver = conn_cmd_receiver.fuse();
         let mut fut_receive_frame = frame_reader.receive_frame().fuse();
 
@@ -191,7 +195,7 @@ async fn connection_loop(
                             .unwrap_or_else(|e| debug!("ConnectionEvent::Disconnected send failed: {e}"));
                         return ConnectionLoopResult::ConnectionClosed;
                     }
-                },
+                }
                 conn_cmd_result = conn_cmd_receiver.next() => {
                     match conn_cmd_result {
                         Some(connection_command) => {
@@ -216,9 +220,17 @@ async fn connection_loop(
                         },
                     }
                 }
+                _ = fut_read_timeout => {
+                    warn!("Connection timed out, no data received for {}", read_timeout.human_format());
+                    conn_event_sender
+                        .unbounded_send(ConnectionEvent::Disconnected)
+                        .unwrap_or_else(|e| debug!("ConnectionEvent::Disconnected send failed: {e}"));
+                    return ConnectionLoopResult::ConnectionClosed;
+                }
                 receive_frame_result = fut_receive_frame => {
                     match receive_frame_result {
                         Ok(frame) => {
+                            fut_read_timeout = futures_time::task::sleep(read_timeout.into()).fuse();
                             conn_event_sender
                                 .unbounded_send(ConnectionEvent::RpcFrameReceived(frame))
                                 .unwrap_or_else(|e| debug!("ConnectionEvent::RpcFrameReceived send failed: {e}"));
