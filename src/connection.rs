@@ -128,9 +128,10 @@ async fn connection_loop(
     // login
     let (user, password) = login_from_url(&config.url);
     let heartbeat_interval = config.heartbeat_interval;
-    // The read timeout can be set to heartbeat interval given that the interval is
-    // significantly larger than roundtrip time.
-    let read_timeout = heartbeat_interval;
+    // The read timeout can be related to the heartbeat interval given that the interval is
+    // significantly larger than roundtrip time. The client has to receive at least a response
+    // to the heartbeat within this interval.
+    let read_timeout = heartbeat_interval * 2;
     info!("Heartbeat interval set to: {:?}", heartbeat_interval);
 
     let login_params = LoginParams {
