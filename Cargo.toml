@@ -1,6 +1,6 @@
 [package]
 name = "shvclient"
-version = "0.3.15"
+version = "0.3.16"
 edition = "2021"
 
 [lib]
@@ -19,7 +19,7 @@ required-features = ["async_std"]
 
 [dev-dependencies]
 clap = { version = "4.4", features = ["derive"] }
-simple_logger = { git = "https://github.com/fvacek/rust-simple_logger.git", branch = "main", features = ["stderr"] }
+simple_logger = { version = "5.0.0", features = ["stderr"] }
 generics-alias = { git = "https://github.com/j4r0u53k/generics-alias-rs.git", branch = "main" }
 
 [dependencies]
