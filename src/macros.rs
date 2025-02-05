@@ -72,7 +72,7 @@ macro_rules! fixed_node {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
                     $(let $app_state = $app_state.expect("Application state should be Some");)?
 
-                    async fn handler($request: ::shvrpc::rpcmessage::RpcMessage, $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: AppState<$T>)?)
+                    async fn handler($request: ::shvrpc::rpcmessage::RpcMessage, $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: $crate::AppState<$T>)?)
                     -> Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> {
                         match $request.method() {
 
