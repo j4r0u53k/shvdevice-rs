@@ -108,7 +108,7 @@ pub struct CallRpcMethodError {
 }
 
 impl CallRpcMethodError {
-    fn new(path: &str, method: &str, error: CallRpcMethodErrorKind) -> Self {
+    pub fn new(path: &str, method: &str, error: CallRpcMethodErrorKind) -> Self {
         Self {
             path: path.to_owned(),
             method: method.to_owned(),
