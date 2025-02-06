@@ -70,7 +70,16 @@ macro_rules! fixed_node {
 
                 if $request.shv_path().unwrap_or_default().is_empty() {
                     let mut __resp = $request.prepare_response().unwrap_or_default();
-                    $(let $app_state = $app_state.expect("Application state should be Some");)?
+                    $(
+                        let Some($app_state) = $app_state else {
+                            log::error!("{}: Application state should be Some", stringify!($fn_name));
+                            __resp.set_error(shvrpc::rpcmessage::RpcError::new(shvrpc::rpcmessage::RpcErrorCode::InternalError, "Ill-formed method implementation"));
+                            if let Err(e) = $client_cmd_tx.send_message(__resp) {
+                                log::error!("{}: Cannot send response ({e})", stringify!($fn_name));
+                            }
+                            return;
+                        };
+                    )?
 
                     async fn handler($request: ::shvrpc::rpcmessage::RpcMessage, $client_cmd_tx: $crate::ClientCommandSender $(, $app_state: $crate::AppState<$T>)?)
                     -> Option<std::result::Result<$crate::clientnode::RpcValue, $crate::clientnode::RpcError>> {
