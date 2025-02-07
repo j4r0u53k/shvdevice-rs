@@ -55,14 +55,15 @@ pub enum ConnectionFailedKind {
     LoginFailed,
 }
 
-pub(crate) enum ShvApiVersion {
+#[derive(Debug, Clone)]
+pub enum ShvApiVersion {
     V2,
     V3,
 }
 
 pub(crate) enum ConnectionEvent {
     ConnectionFailed(ConnectionFailedKind),
-    Connected(Sender<ConnectionCommand>),
+    Connected(Sender<ConnectionCommand>, ShvApiVersion),
     RpcFrameReceived(RpcFrame),
     Disconnected,
 }
@@ -171,7 +172,7 @@ async fn connection_loop(
         let api_version = resp
             .result()?
             .as_list()
-            .into_iter()
+            .iter()
             .find_map(|node| match node.as_str() {
                 "app" => Some(ShvApiVersion::V2),
                 "client" => Some(ShvApiVersion::V3),
@@ -219,7 +220,7 @@ async fn connection_loop(
     let (conn_cmd_sender, conn_cmd_receiver) = futures::channel::mpsc::unbounded();
 
     conn_event_sender
-        .unbounded_send(ConnectionEvent::Connected(conn_cmd_sender))
+        .unbounded_send(ConnectionEvent::Connected(conn_cmd_sender, shv_api_version))
         .unwrap_or_else(|e| debug!("ConnectionEvent::Connected send failed: {e}"));
 
     async {

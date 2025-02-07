@@ -1,4 +1,4 @@
-use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent, ConnectionFailedKind};
+use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent, ConnectionFailedKind, ShvApiVersion};
 use crate::clientnode::{find_longest_path_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
@@ -7,9 +7,10 @@ use futures::channel::mpsc::TrySendError;
 use log::*;
 use shvrpc::client::ClientConfig;
 use shvrpc::metamethod::MetaMethod;
+use shvrpc::rpc::{Glob, ShvRI, SubscriptionParam};
 use shvrpc::rpcdiscovery::{DirParam, DirResult, LsParam, LsResult, MethodInfo};
 use shvrpc::rpcframe::RpcFrame;
-use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
+use shvrpc::rpcmessage::{RpcError, RpcErrorCode, RqId};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvproto::RpcValue;
 use std::collections::{BTreeMap, HashMap};
@@ -40,14 +41,16 @@ pub struct Subscriber {
     notifications_rx: Receiver<RpcFrame>,
     // For unsubscribe on drop
     client_cmd_tx: Sender<ClientCommand>,
-    path: String,
-    signal: String,
+    ri: ShvRI,
     subscription_id: u64,
 }
 
 impl Subscriber {
     pub fn path_signal(&self) -> (&str, &str) {
-        (&self.path, &self.signal)
+        (self.ri.path(), self.ri.signal().unwrap_or("*"))
+    }
+    pub fn ri(&self) -> &ShvRI {
+        &self.ri
     }
 }
 
@@ -66,12 +69,8 @@ impl futures::Stream for Subscriber {
 impl Drop for Subscriber {
     fn drop(&mut self) {
         if let Err(err) = self.client_cmd_tx.unbounded_send(
-            ClientCommand::Unsubscribe {
-                path: self.path.clone(),
-                signal: self.signal.clone(),
-                subscription_id: self.subscription_id,
-            }) {
-            warn!("Cannot unsubscribe path {}, signal {}, error: {}", &self.path, &self.signal, err);
+            ClientCommand::Unsubscribe { subscription_id: self.subscription_id, }) {
+            warn!("Cannot unsubscribe `{}`: {err}", &self.ri);
         };
     }
 }
@@ -275,29 +274,46 @@ impl ClientCommandSender {
         self.sender.unbounded_send(ClientCommand::SendMessage { message })
     }
 
-    pub fn subscribe(&self, path: impl Into<String>, signal: impl Into<String>) -> Result<Subscriber, TrySendError<ClientCommand>> {
-        let path = path.into();
-        let signal = signal.into();
+    pub async fn subscribe(&self, ri: ShvRI) -> Result<Subscriber, CallRpcMethodError> {
         let subscription_id = next_subscription_id();
-        let (notifications_sender, notifications_receiver) = futures::channel::mpsc::unbounded();
-        self.sender.unbounded_send(
-            ClientCommand::Subscribe {
-                path: path.clone(),
-                signal: signal.clone(),
-                subscription_id,
-                notifications_sender
-            }
-        ).map(move |_| {
+        let (notifications_tx, mut notifications_rx) = futures::channel::mpsc::unbounded();
+
+        let make_error = |error_kind: CallRpcMethodErrorKind| {
+            CallRpcMethodError::new("", METH_SUBSCRIBE, error_kind)
+        };
+        use CallRpcMethodErrorKind::*;
+
+        self.sender
+            .unbounded_send(
+                ClientCommand::Subscribe {
+                    ri: ri.clone(),
+                    subscription_id,
+                    notifications_tx,
+                }
+            )
+            .map_err(|_| make_error(ConnectionClosed))?;
+
+        // Wait for the subscribe response
+        notifications_rx
+            .next()
+            .await
+            .ok_or_else(|| make_error(ConnectionClosed))?
+            .to_rpcmesage()
+            .map_err(|e| make_error(InvalidMessage(e.to_string())))?
+            .result()
+            .map_err(|e| make_error(RpcError(e)))?;
+
+        Ok(
             Subscriber {
-                notifications_rx: notifications_receiver,
+                notifications_rx,
                 client_cmd_tx: self.sender.clone(),
-                path,
-                signal,
-                subscription_id,
+                ri,
+                subscription_id
             }
-        })
+        )
     }
 }
+
 
 pub enum ClientCommand {
     SendMessage {
@@ -308,20 +324,19 @@ pub enum ClientCommand {
         response_sender: Sender<RpcFrame>,
     },
     Subscribe {
-        path: String,
-        signal: String,
+        ri: ShvRI,
         subscription_id: u64,
-        notifications_sender: Sender<RpcFrame>,
+        notifications_tx: Sender<RpcFrame>,
     },
     Unsubscribe {
-        path: String,
-        signal: String,
         subscription_id: u64,
     },
     TerminateClient,
 }
 
-const BROKER_APP_NODE: &str = ".broker/app";
+pub const BROKER_APP_NODE: &str = ".broker/app";
+pub const BROKER_CLIENT_NODE: &str = ".broker/client";
+pub const BROKER_CURRENT_CLIENT_NODE: &str = ".broker/currentClient";
 
 // The wrapping struct itself is descriptive
 #[allow(clippy::type_complexity)]
@@ -362,7 +377,7 @@ impl<T> RequestHandler<T> {
 #[derive(Clone)]
 pub enum ClientEvent {
     ConnectionFailed(ConnectionFailedKind),
-    Connected,
+    Connected(ShvApiVersion),
     Disconnected,
 }
 
@@ -425,9 +440,64 @@ impl<T: ?Sized> From<Arc<T>> for AppState<T> {
     }
 }
 
-// path -> signal -> subscription ID -> notification sender
+
+#[derive(Debug)]
+struct SubscriptionEntry {
+    subscr_id: u64,
+    /// For unsubscribe (TODO: reuse glob instead of storing both)
+    ri: ShvRI,
+    /// For matching
+    glob: Glob,
+    sender: Sender<RpcFrame>,
+}
+
+impl SubscriptionEntry {
+    fn matches(&self, ri: &ShvRI, api_version: &ShvApiVersion) -> bool {
+        match api_version {
+            ShvApiVersion::V2 =>
+                ri.signal() == self.ri.signal() &&
+                ri
+                .path()
+                .strip_prefix(self.ri.path())
+                .is_some_and(|rem| rem.is_empty() || rem.starts_with('/')),
+            ShvApiVersion::V3 => self.glob.match_shv_ri(ri),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
-struct Subscriptions(BTreeMap<String, BTreeMap<String, BTreeMap<u64, Sender<RpcFrame>>>>);
+struct Subscriptions(Vec<SubscriptionEntry>);
+
+enum SubscriptionRequest {
+    Subscribe,
+    Unsubscribe,
+}
+
+fn create_subscription_request(ri: &ShvRI, req_type: SubscriptionRequest, api_version: &ShvApiVersion) -> RpcMessage {
+    let method = match req_type {
+        SubscriptionRequest::Subscribe => METH_SUBSCRIBE,
+        SubscriptionRequest::Unsubscribe => METH_UNSUBSCRIBE,
+    };
+    match api_version {
+        ShvApiVersion::V2 =>
+            RpcMessage::new_request(
+                BROKER_APP_NODE,
+                method,
+                Some({
+                    let mut map = shvproto::Map::new();
+                    map.insert("signal".to_string(), ri.signal().unwrap_or_default().into());
+                    map.insert("paths".to_string(),ri.path().into());
+                    map.into()
+                })
+            ),
+        ShvApiVersion::V3 =>
+            RpcMessage::new_request(
+                BROKER_CURRENT_CLIENT_NODE,
+                method,
+                Some(SubscriptionParam { ri: ri.clone(), ttl: None }.to_rpcvalue()),
+            ),
+    }
+}
 
 impl Subscriptions {
     fn new() -> Self {
@@ -440,51 +510,41 @@ impl Subscriptions {
 
     fn add(
         &mut self,
-        path: impl Into<String>,
-        signal: impl Into<String>,
-        subscription_id: u64,
-        notifications_sender: Sender<RpcFrame>,
-    ) -> bool {
-        let path = path.into();
-        let signal = signal.into();
-
-        let path_signal_subscriptions = self.0
-            .entry(path.clone()).or_default()
-            .entry(signal.clone()).or_default();
-
-        let added_new = path_signal_subscriptions.is_empty();
-
-        if path_signal_subscriptions.insert(subscription_id, notifications_sender).is_some() {
-            panic!("Tried to add a subscription with already existing ID: {}. Path: {}, method: {}. Dump: {:?}",
-                subscription_id, path, signal, &self);
+        api_version: &ShvApiVersion,
+        ri: ShvRI,
+        subscr_id: u64,
+        sender: Sender<RpcFrame>,
+    ) -> Result<Option<RpcMessage>, String> {
+        // Patch RI for SHV2
+        let ri = match api_version {
+            ShvApiVersion::V2 => ShvRI::from_path_method_signal(ri.path(), "*", ri.signal())?,
+            ShvApiVersion::V3 => ri,
+        };
+        let glob = ri.to_glob()?;
+        let subscriptions = &mut self.0;
+        if subscriptions.iter().any(|subscr| subscr.subscr_id == subscr_id) {
+            panic!("Tried to add a subscription with already existing ID: {subscr_id}. RI: {ri}. Dump: {self:?}");
         }
-
-        added_new
+        let subscribed_new_ri = !subscriptions.iter().any(|subscr | subscr.ri == ri);
+        let opt_subscription_request = subscribed_new_ri.then(||
+            create_subscription_request(&ri, SubscriptionRequest::Subscribe, api_version)
+        );
+        subscriptions.push(SubscriptionEntry { subscr_id, ri, glob, sender, });
+        Ok(opt_subscription_request)
     }
 
-    fn remove(&mut self, path: impl Into<String>, signal: impl Into<String>, subscription_id: u64) -> bool {
-        let path = path.into();
-        let signal = signal.into();
-
-        let removed_last = if let Some(signals) = self.0.get_mut(&path) {
-            if let Some(ids) = signals.get_mut(&signal) {
-                ids.remove(&subscription_id).map(|_| ids.is_empty())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if removed_last.is_none() {
+    // Returns Some if the last subscription with such RI has been removed
+    fn remove(&mut self, api_version: &ShvApiVersion, subscr_id: u64) -> Option<RpcMessage> {
+        let Some(pos) = self.0.iter().position(|subscr| subscr.subscr_id == subscr_id) else {
             // NOTE: On broker Disconnect all subscriptions are cleared.
             // If there is any NotificationsReceiver that gets dropped,
             // it will try to remove the subscription again.
-            debug!("Remove non-existing subscription for path: {}, signal: {}, id: {}. Dump: {:?}",
-                &path, &signal, &subscription_id, &self);
-        }
-
-        removed_last.is_some_and(|was_last| was_last)
+            debug!("Remove non-existing subscription ID: {subscr_id}. Dump: {self:?}");
+            return None;
+        };
+        let removed_ri = self.0.swap_remove(pos).ri;
+        let is_removed_ri_last = !self.0.iter().any(|subscr| subscr.ri == removed_ri);
+        is_removed_ri_last.then(|| create_subscription_request(&removed_ri, SubscriptionRequest::Unsubscribe, api_version))
     }
 }
 
@@ -596,6 +656,7 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
     {
         let mut pending_rpc_calls: HashMap<i64, Sender<RpcFrame>> = HashMap::new();
         let mut subscriptions = Subscriptions::new();
+        let mut subscription_requests = HashMap::<RqId, u64>::new();
 
         let (client_cmd_tx, mut client_cmd_rx) = futures::channel::mpsc::unbounded();
         let client_cmd_tx = ClientCommandSender { sender: client_cmd_tx };
@@ -610,6 +671,7 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
 
         let mut next_client_cmd = client_cmd_rx.next().fuse();
         let mut next_conn_event = conn_events_rx.next().fuse();
+        let mut shv_api_version = None;
 
         loop {
             select! {
@@ -635,22 +697,47 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                                     .send_message(request)
                                     .unwrap_or_else(|e| error!("Cannot send RpcCall command through ClientCommand channel: {e}"));
                             },
-                            Subscribe { path, signal, subscription_id, notifications_sender } => {
-                                if subscriptions.add(&path, &signal, subscription_id, notifications_sender) {
-                                    let request = create_subscription_request(&path, &signal, SubscriptionRequest::Subscribe);
-                                    client_cmd_tx
-                                        .send_message(request)
-                                        .unwrap_or_else(|e| error!("Cannot send Subscribe command through ClientCommand channel: {e}"));
-                                } else {
-                                    warn!("Path {} and signal {} have already been subscribed!", &path, &signal);
+                            Subscribe { ri, subscription_id, notifications_tx } => {
+                                if let Some(api_version) = &shv_api_version {
+                                    match subscriptions.add(api_version, ri, subscription_id, notifications_tx.clone()) {
+                                        Ok(Some(subscribe_req)) => {
+                                            let req_id = subscribe_req.request_id().expect("Request ID of a subscription request is Some");
+                                            subscription_requests.insert(req_id, subscription_id);
+                                            client_cmd_tx
+                                                .send_message(subscribe_req)
+                                                .unwrap_or_else(|e|
+                                                    error!("Cannot send Subscribe command through ClientCommand channel: {e}")
+                                                );
+                                        }
+                                        Ok(None) => {
+                                            // There is already a subscription with the same RI.
+                                            // Do not subscribe it twice, but send Ok response to
+                                            // the caller.
+                                            if let Ok(mut response) = RpcMessage::new_request("", METH_SUBSCRIBE, None).prepare_response() {
+                                                if let Ok(frame) = response.set_result(()).to_frame() {
+                                                    notifications_tx.unbounded_send(frame).unwrap_or_default();
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            // The subscription params are invalid. Send an error frame to the caller.
+                                            if let Ok(mut response) = RpcMessage::new_request("", METH_SUBSCRIBE, None).prepare_response() {
+                                                if let Ok(err_frame) = response
+                                                    .set_error(RpcError::new(RpcErrorCode::InvalidParam, err)).to_frame() {
+                                                        notifications_tx.unbounded_send(err_frame).unwrap_or_default();
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             },
-                            Unsubscribe { path, signal, subscription_id } => {
-                                if subscriptions.remove(&path, &signal, subscription_id) {
-                                    let request = create_subscription_request(&path, &signal, SubscriptionRequest::Unsubscribe);
-                                    client_cmd_tx
-                                        .send_message(request)
-                                        .unwrap_or_else(|e| error!("Cannot send Unsubscribe command through ClientCommand channel: {e}"));
+                            Unsubscribe { subscription_id } => {
+                                if let Some(api_version) = &shv_api_version {
+                                    if let Some(unsubscribe_req) = subscriptions.remove(api_version, subscription_id) {
+                                        client_cmd_tx
+                                            .send_message(unsubscribe_req)
+                                            .unwrap_or_else(|e| error!("Cannot send Unsubscribe command through ClientCommand channel: {e}"));
+                                    }
                                 }
                             },
                             TerminateClient => {
@@ -673,21 +760,32 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                         use ConnectionEvent::*;
                         match conn_event {
                             RpcFrameReceived(frame) => {
-                                self.process_rpc_frame(frame, &client_cmd_tx, &mut pending_rpc_calls, &mut subscriptions)
-                                    .await
-                                    .unwrap_or_else(|e| error!("Cannot process RPC frame: {e}"));
-                            },
+                                if let Some(api_version) = &shv_api_version {
+                                    self
+                                        .process_rpc_frame(
+                                            frame,
+                                            &client_cmd_tx,
+                                            &mut pending_rpc_calls,
+                                            &mut subscriptions,
+                                            &mut subscription_requests,
+                                            api_version,
+                                        )
+                                        .await
+                                        .unwrap_or_else(|e| error!("Cannot process an RPC frame: {e}"));
+                                }
+                            }
                             ConnectionFailed(kind) => {
                                 if let Err(err) = client_events_tx.try_broadcast(ClientEvent::ConnectionFailed(kind)) {
                                     error!("Client event `ConnectionFailed` broadcast error: {err}");
                                 }
                             }
-                            Connected(sender) => {
+                            Connected(sender, api_version) => {
                                 conn_cmd_sender = Some(sender);
-                                if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Connected) {
+                                shv_api_version = Some(api_version.clone());
+                                if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Connected(api_version)) {
                                     error!("Client event `Connected` broadcast error: {err}");
                                 }
-                            },
+                            }
                             Disconnected => {
                                 conn_cmd_sender = None;
                                 // NOTE: When the client is disconnected, the broker also knows that
@@ -695,11 +793,12 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                                 // registered by the client, so the client can also safely clear
                                 // the subscriptions here.
                                 subscriptions.clear();
+                                subscription_requests.clear();
                                 pending_rpc_calls.clear();
                                 if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Disconnected) {
                                     error!("Client event `Disconnected` broadcast error: {err}");
                                 }
-                            },
+                            }
                         }
                         next_conn_event = conn_events_rx.next().fuse();
                     }
@@ -718,7 +817,19 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
         client_cmd_tx: &ClientCommandSender,
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
         subscriptions: &mut Subscriptions,
+        subscription_requests: &mut HashMap<RqId, u64>,
+        api_version: &ShvApiVersion,
     ) -> shvrpc::Result<()> {
+
+        fn send_subscription_frame(subscr: &SubscriptionEntry, frame: RpcFrame) {
+            if subscr.sender.unbounded_send(frame).is_err() {
+                warn!(
+                    "Notification channel for RI `{}`, id `{}` closed while the subscription is still active",
+                    &subscr.ri, subscr.subscr_id
+                );
+            }
+        }
+
         if frame.is_request() {
             if let Ok(mut request_msg) = frame.to_rpcmesage() {
                 if let Ok(mut resp) = request_msg.prepare_response() {
@@ -760,25 +871,22 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
             }
         } else if frame.is_response() {
             if let Some(req_id) = frame.request_id() {
-                if let Some(response_sender) = pending_rpc_calls.remove(&req_id) {
-                    if response_sender.unbounded_send(frame.clone()).is_err() {
+                if let Some(sender) = pending_rpc_calls.remove(&req_id) {
+                    if sender.unbounded_send(frame.clone()).is_err() {
                         warn!("Response channel closed before received response: {}", &frame);
+                    }
+                } else if let Some(subscr_id) = subscription_requests.remove(&req_id) {
+                    if let Some(subscr) = subscriptions.0.iter().find(|s| s.subscr_id == subscr_id) {
+                        send_subscription_frame(subscr, frame);
                     }
                 }
             }
         } else if frame.is_signal() {
-            if let (Some(path), Some(signal)) = (frame.shv_path(), frame.method()) {
-                for (subscribed_path, subscribed_signals) in &subscriptions.0 {
-                    if path.strip_prefix(subscribed_path).is_some_and(|path_rest| path_rest.is_empty() || path_rest.starts_with('/')) {
-                        if let Some(subscribers) = subscribed_signals.get(signal) {
-                            for (subscription_id, notifications_sender) in subscribers {
-                                if notifications_sender.unbounded_send(frame.clone()).is_err() {
-                                    warn!("Notification channel for path `{}`, signal `{}`, id: {} closed while the subscription is still active",
-                                        &subscribed_path,
-                                        &signal,
-                                        subscription_id);
-                                }
-                            }
+            if let (Some(path), source, signal) = (frame.shv_path(), frame.source(), frame.method()) {
+                if let Ok(notification_ri) = ShvRI::from_path_method_signal(path, source.unwrap_or_default(), signal) {
+                    for subscr in &subscriptions.0 {
+                        if subscr.matches(&notification_ri, api_version) {
+                            send_subscription_frame(subscr, frame.clone());
                         }
                     }
                 }
@@ -786,27 +894,6 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
         }
         Ok(())
     }
-}
-
-enum SubscriptionRequest {
-    Subscribe,
-    Unsubscribe,
-}
-
-fn create_subscription_request(path: &str, signal: &str, request: SubscriptionRequest) -> RpcMessage {
-    RpcMessage::new_request(
-        BROKER_APP_NODE,
-        match request {
-            SubscriptionRequest::Subscribe => METH_SUBSCRIBE,
-            SubscriptionRequest::Unsubscribe => METH_UNSUBSCRIBE,
-        },
-        Some({
-            let mut map = shvproto::Map::new();
-            map.insert("signal".to_string(), signal.into());
-            map.insert("paths".to_string(),path.into());
-            map.into()
-        })
-    )
 }
 
 #[cfg(test)]
@@ -839,7 +926,7 @@ mod tests {
         impl ConnectionMock {
             fn new(conn_evt_tx: &Sender<ConnectionEvent>) -> Self {
                 let (conn_cmd_tx, conn_cmd_rx) = futures::channel::mpsc::unbounded::<ConnectionCommand>();
-                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx)).expect("Connected event send error");
+                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx, crate::connection::ShvApiVersion::V2)).expect("Connected event send error");
                 Self {
                     conn_evt_tx: conn_evt_tx.clone(),
                     conn_cmd_rx,
@@ -870,7 +957,8 @@ mod tests {
         }
 
         async fn expect_client_connected(client_events_rx: &mut ClientEventsReceiver) {
-            let ClientEvent::Connected = client_events_rx.wait_for_event().await.expect("Client event receive") else {
+            // TODO: add ShvApiVersion
+            let ClientEvent::Connected(_) = client_events_rx.wait_for_event().await.expect("Client event receive") else {
                 panic!("Expected Connected client event");
             };
         }
@@ -1005,28 +1093,44 @@ mod tests {
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            crate::runtime::spawn_task(async move {
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+                //
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(43.into()));
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("bar".into()));
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("baz".into()));
+                }
+            );
+
             let mut notify_rx = cli_cmd_tx
-                .subscribe("path/to/resource", SIG_CHNG)
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
                 .expect("ClientCommand subscribe send");
-            conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(1000)).await
-                .expect("Subscribe request timeout");
 
             let mut notify_rx_dup = cli_cmd_tx
-                .subscribe("path/to/resource", SIG_CHNG)
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
                 .expect("ClientCommand subscribe send");
 
             let mut notify_rx_prefix = cli_cmd_tx
-                .subscribe("path/to", SIG_CHNG)
+                .subscribe(ShvRI::from_path_method_signal("path/to", "*", Some(SIG_CHNG)).unwrap())
+                .await
                 .expect("ClientCommand subscribe send");
-            conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(1000)).await
-                .expect("Subscribe request timeout");
-
-            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
-            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(43.into()));
-            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("bar".into()));
-            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("baz".into()));
             check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
             check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
             check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
@@ -1047,22 +1151,37 @@ mod tests {
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+
+            let (tx, _rx) = futures::channel::oneshot::channel();
+            crate::runtime::spawn_task(async move {
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                // Path mismatch
+                conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
+                conn_mock.emulate_receive_signal("path/to/res", SIG_CHNG, Some(42.into()));
+                // Signal mismatch
+                conn_mock.emulate_receive_signal("path/to/resource", "mntchng", Some(42.into()));
+
+                // Keep the channels in conn_mock alive until the recieve_notification in the
+                // parent task times out.
+                let _ = tx.send(conn_mock);
+            }
+            );
+
             let mut notify_rx = cli_cmd_tx
-                .subscribe("path/to/resource", SIG_CHNG)
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
                 .expect("ClientCommand subscribe send");
 
-            conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(1000)).await
-                .expect("Subscribe request timeout");
-
-            // Path mismatch
-            conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
-            conn_mock.emulate_receive_signal("path/to/res", SIG_CHNG, Some(42.into()));
-            // Signal mismatch
-            conn_mock.emulate_receive_signal("path/to/resource", "mntchng", Some(42.into()));
-
             receive_notification(&mut notify_rx)
-                .timeout(Duration::from_millis(1000)).await
+                .timeout(Duration::from_millis(1000))
+                .await
                 .expect_err("Unexpected notification received");
         }
 
@@ -1072,24 +1191,32 @@ mod tests {
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
             let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+
+            let (tx, rx) = futures::channel::oneshot::channel();
+            crate::runtime::spawn_task(async move {
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                let _ = tx.send(conn_mock);
+            });
+
             let mut notify_rx_1 = cli_cmd_tx
-                .subscribe("path/to/resource", SIG_CHNG)
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
                 .expect("ClientCommand subscribe send");
 
-            conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(1000)).await
-                .expect("Subscribe request timeout");
 
             let mut notify_rx_2 = cli_cmd_tx
-                .subscribe("path/to/resource", SIG_CHNG)
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
                 .expect("ClientCommand subscribe send");
 
-            // Sync with the client task to ensure that the subscription
-            // has been registered before emulating signals receive.
-            cli_cmd_tx.send_message(RpcMessage::default()).expect("Send sync message");
-            conn_mock.expect_send_message()
-                .timeout(Duration::from_millis(1000)).await
-                .expect("Sync msg timeout");
+            let mut conn_mock = rx.await.unwrap();
 
             conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
             check_notification_received(&mut notify_rx_1, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;

@@ -138,7 +138,7 @@ async fn emit_chng_task(
                 Ok(ClientEvent::ConnectionFailed(_)) => {
                     warn!("Connection failed");
                 }
-                Ok(ClientEvent::Connected) => {
+                Ok(ClientEvent::Connected(_)) => {
                     emit_signal = true;
                     warn!("Device connected");
                 },
