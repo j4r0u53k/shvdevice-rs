@@ -253,10 +253,11 @@ impl ClientCommandSender {
 
         use CallRpcMethodErrorKind::*;
         self.do_rpc_call_param(path, method, param)
-            .unwrap_or_else(|err|
-                panic!("Cannot send RPC request to the client core. \
-                    Path: `{path}`, method: `{method}`, error: {err}")
-            )
+            .map_err(|err| {
+                warn!("Cannot send RPC request to the client core. \
+                    Path: `{path}`, method: `{method}`, error: {err}");
+                make_error(ConnectionClosed)
+            })?
             .next()
             .await
             .ok_or_else(|| make_error(ConnectionClosed))?
