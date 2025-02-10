@@ -924,9 +924,9 @@ mod tests {
         }
 
         impl ConnectionMock {
-            fn new(conn_evt_tx: &Sender<ConnectionEvent>) -> Self {
+            fn new(conn_evt_tx: &Sender<ConnectionEvent>, api_version: ShvApiVersion) -> Self {
                 let (conn_cmd_tx, conn_cmd_rx) = futures::channel::mpsc::unbounded::<ConnectionCommand>();
-                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx, crate::connection::ShvApiVersion::V2)).expect("Connected event send error");
+                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx, api_version)).expect("Connected event send error");
                 Self {
                     conn_evt_tx: conn_evt_tx.clone(),
                     conn_cmd_rx,
@@ -957,7 +957,6 @@ mod tests {
         }
 
         async fn expect_client_connected(client_events_rx: &mut ClientEventsReceiver) {
-            // TODO: add ShvApiVersion
             let ClientEvent::Connected(_) = client_events_rx.wait_for_event().await.expect("Client event receive") else {
                 panic!("Expected Connected client event");
             };
@@ -972,11 +971,14 @@ mod tests {
         async fn init_connection(
             conn_evt_tx: &Sender<ConnectionEvent>,
             cli_evt_rx: &mut ClientEventsReceiver,
+            api_version: ShvApiVersion,
         ) -> ConnectionMock {
-            let conn_mock = ConnectionMock::new(conn_evt_tx);
+            let conn_mock = ConnectionMock::new(conn_evt_tx, api_version);
             expect_client_connected(cli_evt_rx).await;
             conn_mock
         }
+
+        const SHV_API_VERSION_DEFAULT: ShvApiVersion = ShvApiVersion::V3;
 
         pub(super) async fn receive_connected_and_disconnected_events(
             conn_evt_tx: Sender<ConnectionEvent>,
@@ -984,12 +986,12 @@ mod tests {
             mut client_events_rx: ClientEventsReceiver,
         ) {
             {
-                let _conn_mock = ConnectionMock::new(&conn_evt_tx);
+                let _conn_mock = ConnectionMock::new(&conn_evt_tx, SHV_API_VERSION_DEFAULT);
                 expect_client_connected(&mut client_events_rx).await;
             }
             expect_client_disconnected(&mut client_events_rx).await;
 
-            let _conn_mock = ConnectionMock::new(&conn_evt_tx);
+            let _conn_mock = ConnectionMock::new(&conn_evt_tx, SHV_API_VERSION_DEFAULT);
             expect_client_connected(&mut client_events_rx).await;
         }
 
@@ -998,7 +1000,7 @@ mod tests {
             cli_cmd_tx: ClientCommandSender,
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, SHV_API_VERSION_DEFAULT).await;
 
             cli_cmd_tx.send_message(RpcMessage::new_request(
                     "path/test",
@@ -1019,7 +1021,7 @@ mod tests {
             cli_cmd_tx: ClientCommandSender,
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, SHV_API_VERSION_DEFAULT).await;
 
             cli_cmd_tx.send_message(RpcMessage::new_request(
                     "path/test",
@@ -1048,7 +1050,7 @@ mod tests {
             cli_cmd_tx: ClientCommandSender,
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, SHV_API_VERSION_DEFAULT).await;
             let mut resp_rx = cli_cmd_tx
                 .do_rpc_call("path/to/resource", "get")
                 .expect("RpcCall command send");
@@ -1087,12 +1089,13 @@ mod tests {
             assert_eq!(received_msg.param(), param);
         }
 
-        pub(super) async fn receive_subscribed_notification(
+        // Notifications in SHV API v2
+        pub(super) async fn receive_subscribed_notification_v2(
             conn_evt_tx: Sender<ConnectionEvent>,
             cli_cmd_tx: ClientCommandSender,
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, ShvApiVersion::V2).await;
             crate::runtime::spawn_task(async move {
                 let subscription_req = conn_mock.expect_send_message()
                     .timeout(Duration::from_millis(1000))
@@ -1145,12 +1148,12 @@ mod tests {
             check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
         }
 
-        pub(super) async fn do_not_receive_unsubscribed_notification(
+        pub(super) async fn do_not_receive_unsubscribed_notification_v2(
             conn_evt_tx: Sender<ConnectionEvent>,
             cli_cmd_tx: ClientCommandSender,
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, ShvApiVersion::V2).await;
 
             let (tx, _rx) = futures::channel::oneshot::channel();
             crate::runtime::spawn_task(async move {
@@ -1185,12 +1188,12 @@ mod tests {
                 .expect_err("Unexpected notification received");
         }
 
-        pub(super) async fn subscribe_and_unsubscribe(
+        pub(super) async fn subscribe_and_unsubscribe_v2(
             conn_evt_tx: Sender<ConnectionEvent>,
             cli_cmd_tx: ClientCommandSender,
             mut cli_evt_rx: ClientEventsReceiver,
         ) {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, ShvApiVersion::V2).await;
 
             let (tx, rx) = futures::channel::oneshot::channel();
             crate::runtime::spawn_task(async move {
@@ -1232,11 +1235,165 @@ mod tests {
                 .expect("Unsubscribe request timeout");
             assert_eq!(unsubscribe_req.shv_path(), Some(BROKER_APP_NODE));
             assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
-            let shvproto::Value::Map(params) = unsubscribe_req.param().expect("Unsubscribe request has param").value() else {
-                panic!("Unsubscribe params is not a map");
-            };
-            assert_eq!(params.get("signal").map(shvproto::RpcValue::as_str), Some(SIG_CHNG));
-            assert_eq!(params.get("paths").map(shvproto::RpcValue::as_str), Some("path/to/resource"));
+
+            let param = unsubscribe_req.param().expect("Unsubscribe request has param");
+            let param = SubscriptionParam::from_rpcvalue(param).unwrap();
+            assert_eq!(param.ri.signal(), Some(SIG_CHNG));
+            assert_eq!(param.ri.path(), "path/to/resource");
+            assert!(param.ttl.is_none());
+        }
+
+        // Notifications in SHV API v3
+        pub(super) async fn receive_subscribed_notification_v3(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, ShvApiVersion::V3).await;
+            crate::runtime::spawn_task(async move {
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+                //
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(43.into()));
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("bar".into()));
+                conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("baz".into()));
+                }
+            );
+
+            let mut notify_rx = cli_cmd_tx
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
+                .expect("ClientCommand subscribe send");
+
+            let mut notify_rx_dup = cli_cmd_tx
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
+                .expect("ClientCommand subscribe send");
+
+            let mut notify_rx_prefix = cli_cmd_tx
+                .subscribe(ShvRI::from_path_method_signal("path/to/*", "*", Some(SIG_CHNG)).unwrap())
+                .await
+                .expect("ClientCommand subscribe send");
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+            check_notification_received(&mut notify_rx, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+            check_notification_received(&mut notify_rx_dup, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&43.into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+            check_notification_received(&mut notify_rx_prefix, Some("path/to/resource"), Some(SIG_CHNG), Some(&"baz".into())).await;
+        }
+
+        pub(super) async fn do_not_receive_unsubscribed_notification_v3(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, ShvApiVersion::V3).await;
+
+            let (tx, _rx) = futures::channel::oneshot::channel();
+            crate::runtime::spawn_task(async move {
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                // Path mismatch
+                conn_mock.emulate_receive_signal("path/to/resource2", SIG_CHNG, Some(42.into()));
+                conn_mock.emulate_receive_signal("path/to/res", SIG_CHNG, Some(42.into()));
+                // Signal mismatch
+                conn_mock.emulate_receive_signal("path/to/resource", "mntchng", Some(42.into()));
+
+                // Keep the channels in conn_mock alive until the recieve_notification in the
+                // parent task times out.
+                let _ = tx.send(conn_mock);
+            }
+            );
+
+            let mut notify_rx = cli_cmd_tx
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
+                .expect("ClientCommand subscribe send");
+
+            receive_notification(&mut notify_rx)
+                .timeout(Duration::from_millis(1000))
+                .await
+                .expect_err("Unexpected notification received");
+        }
+
+        pub(super) async fn subscribe_and_unsubscribe_v3(
+            conn_evt_tx: Sender<ConnectionEvent>,
+            cli_cmd_tx: ClientCommandSender,
+            mut cli_evt_rx: ClientEventsReceiver,
+        ) {
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, ShvApiVersion::V3).await;
+
+            let (tx, rx) = futures::channel::oneshot::channel();
+            crate::runtime::spawn_task(async move {
+                let subscription_req = conn_mock.expect_send_message()
+                    .timeout(Duration::from_millis(1000))
+                    .await
+                    .expect("Subscribe request timeout");
+
+                // The subscription response
+                conn_mock.emulate_receive_response(&subscription_req, ());
+
+                let _ = tx.send(conn_mock);
+            });
+
+            let mut notify_rx_1 = cli_cmd_tx
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
+                .expect("ClientCommand subscribe send");
+
+
+            let mut notify_rx_2 = cli_cmd_tx
+                .subscribe(ShvRI::from_path_method_signal("path/to/resource", "*", Some(SIG_CHNG)).unwrap())
+                .await
+                .expect("ClientCommand subscribe send");
+
+            let mut conn_mock = rx.await.unwrap();
+
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some(42.into()));
+            check_notification_received(&mut notify_rx_1, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+            check_notification_received(&mut notify_rx_2, Some("path/to/resource"), Some(SIG_CHNG), Some(&42.into())).await;
+
+            drop(notify_rx_1);
+            conn_mock.emulate_receive_signal("path/to/resource", SIG_CHNG, Some("bar".into()));
+            check_notification_received(&mut notify_rx_2, Some("path/to/resource"), Some(SIG_CHNG), Some(&"bar".into())).await;
+
+            drop(notify_rx_2);
+            let unsubscribe_req = conn_mock.expect_send_message()
+                .timeout(Duration::from_millis(1000)).await
+                .expect("Unsubscribe request timeout");
+            assert_eq!(unsubscribe_req.shv_path(), Some(BROKER_CURRENT_CLIENT_NODE));
+            assert_eq!(unsubscribe_req.method(), Some("unsubscribe"));
+            let param = unsubscribe_req.param().expect("Unsubscribe request has param");
+            let param = SubscriptionParam::from_rpcvalue(param).unwrap();
+            assert_eq!(param.ri.signal(), Some(SIG_CHNG));
+            assert_eq!(param.ri.path(), "path/to/resource");
+            assert!(param.ttl.is_none());
         }
 
         // Request handling tests
@@ -1293,7 +1450,7 @@ mod tests {
                                          _cli_cmd_tx: ClientCommandSender,
                                          mut cli_evt_rx: ClientEventsReceiver)
         {
-            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx).await;
+            let mut conn_mock = init_connection(&conn_evt_tx, &mut cli_evt_rx, SHV_API_VERSION_DEFAULT).await;
 
             {
                 // Nonexisting method or path
@@ -1477,9 +1634,12 @@ mod tests {
         send_message_fails #[should_panic],
         call_method_timeouts_when_disconnected,
         call_method_and_receive_response,
-        receive_subscribed_notification,
-        do_not_receive_unsubscribed_notification,
-        subscribe_and_unsubscribe,
+        receive_subscribed_notification_v2,
+        do_not_receive_unsubscribed_notification_v2,
+        subscribe_and_unsubscribe_v2,
+        receive_subscribed_notification_v3,
+        do_not_receive_unsubscribed_notification_v3,
+        subscribe_and_unsubscribe_v3,
         handle_method_calls (make_client_with_handlers())
     }
 
