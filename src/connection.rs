@@ -177,8 +177,7 @@ async fn connection_loop(
                 "app" => Some(ShvApiVersion::V2),
                 "client" => Some(ShvApiVersion::V3),
                 _ => None,
-            }
-            )
+            })
             .unwrap_or_else(|| {
                 warn!("Cannot detect SHV API version. Using version 2 as a fallback.");
                 ShvApiVersion::V2
