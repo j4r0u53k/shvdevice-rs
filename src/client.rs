@@ -1,5 +1,5 @@
-use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent, ConnectionFailedKind, ShvApiVersion};
-use crate::clientnode::{find_longest_path_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS};
+use crate::connection::{spawn_connection_task, ConnectionCommand, ConnectionEvent, ConnectionFailedKind};
+use crate::clientnode::{find_longest_path_prefix, process_local_dir_ls, ClientNode, RequestResult, Route, METH_DIR, METH_LS, METH_PING};
 use async_broadcast::RecvError;
 use futures::future::BoxFuture;
 use futures::{select, Future, FutureExt, StreamExt};
@@ -374,6 +374,12 @@ impl<T> RequestHandler<T> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ShvApiVersion {
+    V2,
+    V3,
+}
+
 #[derive(Clone)]
 pub enum ClientEvent {
     ConnectionFailed(ConnectionFailedKind),
@@ -672,9 +678,28 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
             init_handler(client_cmd_tx.clone(), client_events_receiver);
         }
 
+        async fn check_shv_api_version(client_cmd_tx: ClientCommandSender) -> Result<ShvApiVersion, CallRpcMethodError>
+        {
+            let api_version = client_cmd_tx
+                .call_ls_list(".broker")
+                .await?
+                .iter()
+                .find_map(|node| match node.as_str() {
+                    "app" => Some(ShvApiVersion::V2),
+                    "client" => Some(ShvApiVersion::V3),
+                    _ => None,
+                })
+            .unwrap_or_else(|| {
+                warn!("Cannot detect SHV API version. Using version 2 as a fallback.");
+                ShvApiVersion::V2
+            });
+            Ok(api_version)
+        }
+
         let mut next_client_cmd = client_cmd_rx.next().fuse();
         let mut next_conn_event = conn_events_rx.next().fuse();
         let mut shv_api_version = None;
+        let (api_version_tx, mut api_version_rx) = futures::channel::mpsc::unbounded();
 
         loop {
             select! {
@@ -733,11 +758,11 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                                         }
                                     }
                                 } else {
-                                    // Subscribe called before Connected event received. Send and
-                                    // error frame to the caller.
+                                    // Subscribe called before the SHV API version has been
+                                    // determined. Send an error frame to the caller.
                                     if let Ok(mut response) = RpcMessage::new_request("", METH_SUBSCRIBE, None).prepare_response() {
                                         if let Ok(err_frame) = response
-                                            .set_error(RpcError::new(RpcErrorCode::InternalError, "Subscribe called before the client got connected to the broker.")).to_frame() {
+                                            .set_error(RpcError::new(RpcErrorCode::InternalError, "Unable to subscribe, because SHV API version is unknown.")).to_frame() {
                                                 notifications_tx.unbounded_send(err_frame).unwrap_or_default();
                                         }
                                     }
@@ -771,7 +796,6 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                         use ConnectionEvent::*;
                         match conn_event {
                             RpcFrameReceived(frame) => {
-                                let api_version = shv_api_version.as_ref().expect("SHV API version is known when an RPC frame is received.");
                                 self
                                     .process_rpc_frame(
                                         frame,
@@ -779,7 +803,7 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                                         &mut pending_rpc_calls,
                                         &mut subscriptions,
                                         &mut subscription_requests,
-                                        api_version,
+                                        &shv_api_version,
                                     )
                                     .await
                                     .unwrap_or_else(|e| error!("Cannot process an RPC frame: {e}"));
@@ -789,11 +813,34 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                                     error!("Client event `ConnectionFailed` broadcast error: {err}");
                                 }
                             }
-                            Connected(sender, api_version) => {
+                            Connected(sender) => {
                                 conn_cmd_sender = Some(sender);
-                                shv_api_version = Some(api_version.clone());
-                                if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Connected(api_version)) {
-                                    error!("Client event `Connected` broadcast error: {err}");
+                                // Check SHV API version
+                                let client_cmd_tx = client_cmd_tx.clone();
+                                let api_version_tx = api_version_tx.clone();
+                                crate::runtime::spawn_task(async move {
+                                    let api_version_res = check_shv_api_version(client_cmd_tx)
+                                        .await
+                                        .inspect_err(|e| warn!("check_api_version failed: {e}"));
+                                    api_version_tx
+                                        .unbounded_send(api_version_res)
+                                        .unwrap_or_else(|e| warn!("check_api_version send result failed: {e}"));
+                                });
+                            }
+                            HeartbeatTimeout => {
+                                if let Some(api_version) = &shv_api_version {
+                                    let broker_app_path = match api_version {
+                                        ShvApiVersion::V2 => ".broker/app",
+                                        ShvApiVersion::V3 => ".app",
+                                    };
+                                    let message = RpcMessage::new_request(broker_app_path, METH_PING, None);
+                                    client_cmd_tx
+                                        .send_message(message)
+                                        .unwrap_or_else(|e|
+                                            error!("Cannot send ping through ClientCommand channel: {e}")
+                                        );
+                                } else {
+                                    warn!("Unable to send ping, because SHV API version is unknown.");
                                 }
                             }
                             Disconnected => {
@@ -817,6 +864,26 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
                         return Ok(());
                     }
                 },
+                api_version_result = api_version_rx.next() => match api_version_result {
+                    Some(Ok(api_version)) => {
+                        info!("SHV API version {}", match api_version {
+                            ShvApiVersion::V2 => "v2",
+                            ShvApiVersion::V3 => "v3",
+                        });
+                        shv_api_version = Some(api_version.clone());
+                        if let Err(err) = client_events_tx.try_broadcast(ClientEvent::Connected(api_version)) {
+                            error!("Client event `Connected` broadcast error: {err}");
+                        }
+                    }
+                    _ => {
+                        // TODO: the client might send `Connected` with `ShvApiVersion::Unknown` or
+                        // similar, so the client can communicate in a restricted mode. It would
+                        // have to send heartbeats and could not do subscriptions.
+                        if let Err(err) = client_events_tx.try_broadcast(ClientEvent::ConnectionFailed(ConnectionFailedKind::NetworkError)) {
+                            error!("Client event `ConnectionFailed` broadcast error: {err}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -828,7 +895,7 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
         pending_rpc_calls: &mut HashMap<i64, Sender<RpcFrame>>,
         subscriptions: &mut Subscriptions,
         subscription_requests: &mut HashMap<RqId, u64>,
-        api_version: &ShvApiVersion,
+        api_version: &Option<ShvApiVersion>,
     ) -> shvrpc::Result<()> {
 
         fn send_subscription_frame(subscr: &SubscriptionEntry, frame: RpcFrame) {
@@ -894,10 +961,15 @@ impl<V: ClientVariant, T: Send + Sync + 'static> Client<V, T> {
         } else if frame.is_signal() {
             if let (Some(path), source, signal) = (frame.shv_path(), frame.source(), frame.method()) {
                 if let Ok(notification_ri) = ShvRI::from_path_method_signal(path, source.unwrap_or_default(), signal) {
-                    for subscr in &subscriptions.0 {
-                        if subscr.matches(&notification_ri, api_version) {
-                            send_subscription_frame(subscr, frame.clone());
+                    if let Some(api_version) = api_version {
+                        for subscr in &subscriptions.0 {
+                            if subscr.matches(&notification_ri, api_version) {
+                                debug!("Send subscription frame: {frame:?}");
+                                send_subscription_frame(subscr, frame.clone());
+                            }
                         }
+                    } else {
+                        warn!("Cannot process a notification frame {notification_ri}, because SHV API version is unknown.");
                     }
                 }
             }
@@ -934,9 +1006,9 @@ mod tests {
         }
 
         impl ConnectionMock {
-            fn new(conn_evt_tx: &Sender<ConnectionEvent>, api_version: ShvApiVersion) -> Self {
+            fn new(conn_evt_tx: &Sender<ConnectionEvent>) -> Self {
                 let (conn_cmd_tx, conn_cmd_rx) = futures::channel::mpsc::unbounded::<ConnectionCommand>();
-                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx, api_version)).expect("Connected event send error");
+                conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx)).expect("Connected event send error");
                 Self {
                     conn_evt_tx: conn_evt_tx.clone(),
                     conn_cmd_rx,
@@ -983,7 +1055,17 @@ mod tests {
             cli_evt_rx: &mut ClientEventsReceiver,
             api_version: ShvApiVersion,
         ) -> ConnectionMock {
-            let conn_mock = ConnectionMock::new(conn_evt_tx, api_version);
+            let mut conn_mock = ConnectionMock::new(conn_evt_tx);
+            // Check SHV API version
+            let req = conn_mock.expect_send_message().await;
+            assert_eq!(req.shv_path(), Some(".broker"));
+            assert_eq!(req.method(), Some("ls"));
+            let resp = match api_version {
+                ShvApiVersion::V2 => vec![RpcValue::from("app")],
+                ShvApiVersion::V3 => vec![RpcValue::from("client")],
+            };
+            conn_mock.emulate_receive_response(&req, resp);
+
             expect_client_connected(cli_evt_rx).await;
             conn_mock
         }
@@ -996,13 +1078,11 @@ mod tests {
             mut client_events_rx: ClientEventsReceiver,
         ) {
             {
-                let _conn_mock = ConnectionMock::new(&conn_evt_tx, SHV_API_VERSION_DEFAULT);
-                expect_client_connected(&mut client_events_rx).await;
+                let _conn_mock = init_connection(&conn_evt_tx, &mut client_events_rx, SHV_API_VERSION_DEFAULT).await;
             }
             expect_client_disconnected(&mut client_events_rx).await;
 
-            let _conn_mock = ConnectionMock::new(&conn_evt_tx, SHV_API_VERSION_DEFAULT);
-            expect_client_connected(&mut client_events_rx).await;
+            let _conn_mock = init_connection(&conn_evt_tx, &mut client_events_rx, SHV_API_VERSION_DEFAULT).await;
         }
 
         pub(super) async fn send_message(
