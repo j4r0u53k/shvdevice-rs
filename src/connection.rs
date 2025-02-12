@@ -1,5 +1,4 @@
 use crate::runtime::{current_task_runtime, Runtime};
-use crate::clientnode::METH_PING;
 pub use crate::client::Sender;
 use duration_str::HumanFormat;
 use futures::{select, FutureExt, StreamExt};
@@ -55,16 +54,11 @@ pub enum ConnectionFailedKind {
     LoginFailed,
 }
 
-#[derive(Debug, Clone)]
-pub enum ShvApiVersion {
-    V2,
-    V3,
-}
-
 pub(crate) enum ConnectionEvent {
     ConnectionFailed(ConnectionFailedKind),
-    Connected(Sender<ConnectionCommand>, ShvApiVersion),
+    Connected(Sender<ConnectionCommand>),
     RpcFrameReceived(RpcFrame),
+    HeartbeatTimeout,
     Disconnected,
 }
 
@@ -161,46 +155,6 @@ async fn connection_loop(
     };
     info!("Login OK, client ID: {client_id}");
 
-    async fn check_shv_api_version(
-        frame_reader: &mut (dyn FrameReader + Send),
-        frame_writer: &mut (dyn FrameWriter + Send),
-    ) -> shvrpc::Result<ShvApiVersion>
-    {
-        let rq = RpcMessage::new_request(".broker", "ls", None);
-        frame_writer.send_message(rq).await?;
-        let resp = frame_reader.receive_message().await?;
-        let api_version = resp
-            .result()?
-            .as_list()
-            .iter()
-            .find_map(|node| match node.as_str() {
-                "app" => Some(ShvApiVersion::V2),
-                "client" => Some(ShvApiVersion::V3),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                warn!("Cannot detect SHV API version. Using version 2 as a fallback.");
-                ShvApiVersion::V2
-            });
-        Ok(api_version)
-    }
-
-    let shv_api_version = match check_shv_api_version(&mut frame_reader, &mut frame_writer).await {
-        Ok(version) => version,
-        Err(err) => {
-            warn!("Error occured while checking SHV API version: {err}");
-            conn_event_sender
-                .unbounded_send(ConnectionEvent::ConnectionFailed(ConnectionFailedKind::NetworkError))
-                .unwrap_or_else(|e| debug!("ConnectionEvent::ConnectionFailed(NetworkError) send failed: {e}"));
-            return ConnectionLoopResult::ConnectionClosed;
-        }
-    };
-
-    let broker_app_path = match shv_api_version {
-        ShvApiVersion::V2 => ".broker/app",
-        ShvApiVersion::V3 => ".app",
-    };
-
     let (writer_tx, mut writer_rx) = futures::channel::mpsc::unbounded();
     let _writer_task = crate::runtime::spawn_task(async move {
         debug!("Writer task start");
@@ -219,7 +173,7 @@ async fn connection_loop(
     let (conn_cmd_sender, conn_cmd_receiver) = futures::channel::mpsc::unbounded();
 
     conn_event_sender
-        .unbounded_send(ConnectionEvent::Connected(conn_cmd_sender, shv_api_version))
+        .unbounded_send(ConnectionEvent::Connected(conn_cmd_sender))
         .unwrap_or_else(|e| debug!("ConnectionEvent::Connected send failed: {e}"));
 
     async {
@@ -231,17 +185,9 @@ async fn connection_loop(
         loop {
             select! {
                 _ = fut_heartbeat_timeout => {
-                    // send heartbeat
-                    let message = RpcMessage::new_request(broker_app_path, METH_PING, None);
-                    // reset heartbeat timer
-                    fut_heartbeat_timeout = futures_time::task::sleep(heartbeat_interval.into()).fuse();
-                    if let Err(err) = writer_tx.unbounded_send(message) {
-                        warn!("Cannot send message to the writer task: {err}");
-                        conn_event_sender
-                            .unbounded_send(ConnectionEvent::Disconnected)
-                            .unwrap_or_else(|e| debug!("ConnectionEvent::Disconnected send failed: {e}"));
-                        return ConnectionLoopResult::ConnectionClosed;
-                    }
+                    // send heartbeat event
+                    conn_event_sender.unbounded_send(ConnectionEvent::HeartbeatTimeout)
+                        .unwrap_or_else(|e| debug!("ConnectionEvent::HeartbeatTimeout send failed: {e}"));
                 }
                 conn_cmd_result = conn_cmd_receiver.next() => {
                     match conn_cmd_result {
@@ -284,6 +230,9 @@ async fn connection_loop(
                         }
                         Err(e) => {
                             warn!("Receive frame error: {e}");
+                            conn_event_sender
+                                .unbounded_send(ConnectionEvent::Disconnected)
+                                .unwrap_or_else(|e| debug!("ConnectionEvent::Disconnected send failed: {e}"));
                             return ConnectionLoopResult::ConnectionClosed;
                         }
                     }
